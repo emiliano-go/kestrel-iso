@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-use_omarchy_helpers() {
-  export OMARCHY_PATH="/root/omarchy"
-  export OMARCHY_INSTALL="/root/omarchy/install"
-  export OMARCHY_INSTALL_LOG_FILE="/var/log/omarchy-install.log"
-  source /root/omarchy/install/helpers/all.sh
+# Installer helpers live on the ISO (this repo owns installation
+# orchestration); the Kestrel payload only supplies the file tree.
+use_kestrel_helpers() {
+  export KESTREL_PATH="/root/kestrel"
+  export KESTREL_INSTALL="/root/kestrel/install"
+  export KESTREL_INSTALL_LOG_FILE="/var/log/kestrel-install.log"
+  source /root/helpers/all.sh
 }
 
 run_configurator() {
   set_tokyo_night_colors
   ./configurator
-  export OMARCHY_USER="$(jq -r '.users[0].username' user_credentials.json)"
+  export KESTREL_USER="$(jq -r '.users[0].username' user_credentials.json)"
 }
 
 install_arch() {
@@ -19,23 +21,32 @@ install_arch() {
   gum style --foreground 3 --padding "1 0 0 $PADDING_LEFT" "Installing..."
   echo
 
-  touch /var/log/omarchy-install.log
+  touch /var/log/kestrel-install.log
 
   start_log_output
 
   # Set CURRENT_SCRIPT for the trap to display better when nothing is returned for some reason
   CURRENT_SCRIPT="install_base_system"
-  install_base_system > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>/var/log/omarchy-install.log) 2>&1
+  install_base_system > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>/var/log/kestrel-install.log) 2>&1
   unset CURRENT_SCRIPT
   stop_log_output
 }
 
-install_omarchy() {
-  chroot_bash -lc "sudo pacman -S --noconfirm --needed gum" >/dev/null
-  chroot_bash -lc "source /home/$OMARCHY_USER/.local/share/omarchy/install.sh || bash"
+install_kestrel() {
+  clear_logo
+  gum style --foreground 3 --padding "1 0 0 $PADDING_LEFT" "Setting up Kestrel..."
+  echo
 
-  # Reboot if requested by installer
-  if [[ -f /mnt/var/tmp/omarchy-install-completed ]]; then
+  start_log_output
+
+  CURRENT_SCRIPT="deploy_kestrel"
+  deploy_kestrel > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>/var/log/kestrel-install.log) 2>&1
+  unset CURRENT_SCRIPT
+
+  stop_log_output
+
+  # Reboot if requested by the installer
+  if [[ -f /mnt/var/tmp/kestrel-install-completed ]]; then
     reboot
   fi
 }
@@ -71,7 +82,6 @@ install_base_system() {
   # Initialize and populate the keyring
   pacman-key --init
   pacman-key --populate archlinux
-  pacman-key --populate omarchy
 
   # Sync the offline database so pacman can find packages
   pacman -Sy --noconfirm
@@ -89,53 +99,65 @@ install_base_system() {
     --skip-wkd \
     --skip-wifi-check
 
-  # After archinstall sets up the base system but before our installer runs,
-  # we need to ensure the offline pacman.conf is in place
+  # After archinstall sets up the base system but before the Kestrel setup runs,
+  # put the offline pacman.conf in place and mount the ISO's bundled repo.
   cp /etc/pacman.conf /mnt/etc/pacman.conf
 
-  # Mount the offline mirror so it's accessible in the chroot
-  mkdir -p /mnt/var/cache/omarchy/mirror/offline
-  mount --bind /var/cache/omarchy/mirror/offline /mnt/var/cache/omarchy/mirror/offline
+  mkdir -p /mnt/var/cache/kestrel/mirror/offline
+  mount --bind /var/cache/kestrel/mirror/offline /mnt/var/cache/kestrel/mirror/offline
 
-  # Mount the packages dir so it's accessible in the chroot
   mkdir -p /mnt/opt/packages
   mount --bind /opt/packages /mnt/opt/packages
-
-  # No need to ask for sudo during the installation (omarchy itself responsible for removing after install)
-  mkdir -p /mnt/etc/sudoers.d
-  cat >/mnt/etc/sudoers.d/99-omarchy-installer <<EOF
-root ALL=(ALL:ALL) NOPASSWD: ALL
-%wheel ALL=(ALL:ALL) NOPASSWD: ALL
-$OMARCHY_USER ALL=(ALL:ALL) NOPASSWD: ALL
-EOF
-  chmod 440 /mnt/etc/sudoers.d/99-omarchy-installer
-
-  # Copy the local omarchy repo to the user's home directory
-  mkdir -p /mnt/home/$OMARCHY_USER/.local/share/
-  cp -r /root/omarchy /mnt/home/$OMARCHY_USER/.local/share/
-
-  chown -R 1000:1000 /mnt/home/$OMARCHY_USER/.local/
-
-  # Ensure all necessary scripts are executable
-  find /mnt/home/$OMARCHY_USER/.local/share/omarchy -type f -path "*/bin/*" -exec chmod +x {} \;
-  chmod +x /mnt/home/$OMARCHY_USER/.local/share/omarchy/boot.sh 2>/dev/null || true
-  chmod +x /mnt/home/$OMARCHY_USER/.local/share/omarchy/default/waybar/indicators/screen-recording.sh 2>/dev/null || true
 }
 
-chroot_bash() {
-  HOME=/home/$OMARCHY_USER \
-    arch-chroot -u $OMARCHY_USER /mnt/ \
-    env OMARCHY_CHROOT_INSTALL=1 \
-    OMARCHY_USER_NAME="$(<user_full_name.txt)" \
-    OMARCHY_USER_EMAIL="$(<user_email_address.txt)" \
-    USER="$OMARCHY_USER" \
-    HOME="/home/$OMARCHY_USER" \
-    /bin/bash "$@"
+# Deploy the payload into the target and run its root-side and per-user setup.
+deploy_kestrel() {
+  local packages
+
+  # 1. Copy the payload to its installed location.
+  mkdir -p /mnt/usr/share
+  rm -rf /mnt/usr/share/kestrel
+  cp -rp /root/kestrel /mnt/usr/share/kestrel
+  rm -rf /mnt/usr/share/kestrel/.git
+  # The router only lists executable files; make sure the payload's commands are.
+  find /mnt/usr/share/kestrel/bin -maxdepth 1 -type f -exec chmod +x {} +
+
+  # 2. Install the Arch and AUR package set from the ISO's bundled repo. The AUR
+  #    list pins a version as name=version, so strip it for the package name.
+  packages=$(grep -hvE '^[[:space:]]*(#|$)' \
+    /mnt/usr/share/kestrel/install/kestrel-base.packages \
+    /mnt/usr/share/kestrel/install/kestrel-other.packages \
+    /mnt/usr/share/kestrel/install/kestrel-aur.packages |
+    sed -E 's/=.*$//' | sort -u | tr '\n' ' ')
+  chroot_root pacman -S --noconfirm --needed $packages
+
+  # 3. Root-side setup: deploys Kestrel files, configures the system, and runs
+  #    hardware detection.
+  chroot_root kestrel apply system --install-user "$KESTREL_USER" --first-install
+
+  # 4. Per-user finalization (skill symlinks, xdg dirs, install/user/*).
+  chroot_user kestrel finalize user --first-install
+}
+
+chroot_root() {
+  arch-chroot /mnt/ env \
+    PATH="/usr/share/kestrel/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
+    "$@"
+}
+
+chroot_user() {
+  arch-chroot -u "$KESTREL_USER" /mnt/ \
+    env \
+    USER="$KESTREL_USER" \
+    HOME="/home/$KESTREL_USER" \
+    KESTREL_FIRST_INSTALL=1 \
+    PATH="/usr/share/kestrel/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
+    "$@"
 }
 
 if [[ $(tty) == "/dev/tty1" ]]; then
-  use_omarchy_helpers
+  use_kestrel_helpers
   run_configurator
   install_arch
-  install_omarchy
+  install_kestrel
 fi

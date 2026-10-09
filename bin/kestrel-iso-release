@@ -1,7 +1,7 @@
 #!/bin/bash
 
 if [ $# -eq 0 ]; then
-  echo "Usage: omarchy-iso-release [version]"
+  echo "Usage: kestrel-iso-release [version]"
   exit 1
 fi
 
@@ -12,20 +12,20 @@ BULD_VERSION="$1"
 # Make ISOs
 if [[ $1 != "--no-make" ]]; then
   echo -e "\e[32mMaking master ISO\e[0m"
-  OMARCHY_INSTALLER_REF=master omarchy-iso-make --no-cache --no-boot-offer
+  KESTREL_INSTALLER_REF=master kestrel-iso-make --no-cache --no-boot-offer
 else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
 # Sign and upload master ISO
 latest_master_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*x86_64-master.iso | head -n1)
-release_master_iso="$BUILD_RELEASE_PATH/omarchy-$BULD_VERSION.iso"
+release_master_iso="$BUILD_RELEASE_PATH/kestrel-$BULD_VERSION.iso"
 cp "$latest_master_iso" "$release_master_iso"
 
 echo -e "\e[32mSigning master ISO\e[0m"
-omarchy-iso-sign "$release_master_iso"
+kestrel-iso-sign "$release_master_iso"
 
 master_sha=$(sha256sum "$release_master_iso")
 echo -e "\e[32mSHA256 for master ISO: $master_sha\e[0m"
 
-omarchy-iso-upload "$release_master_iso"
+kestrel-iso-upload "$release_master_iso"

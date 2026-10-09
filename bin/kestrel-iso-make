@@ -20,7 +20,7 @@ while [[ $# -gt 0 ]]; do
     shift
     ;;
   --dev)
-    OMARCHY_INSTALLER_REF=dev
+    KESTREL_INSTALLER_REF=dev
     shift
     ;;
   *)
@@ -40,14 +40,14 @@ BUILD_ROOT=$(realpath "${BASH_SOURCE[0]%/*}/..")
 BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 mkdir -p "$BUILD_RELEASE_PATH"
 
-OMARCHY_INSTALLER_REPO="${OMARCHY_INSTALLER_REPO:-basecamp/omarchy}"
-OMARCHY_INSTALLER_REF="${OMARCHY_INSTALLER_REF:-master}"
+KESTREL_INSTALLER_REPO="${KESTREL_INSTALLER_REPO:-emiliano-go/kestrel}"
+KESTREL_INSTALLER_REF="${KESTREL_INSTALLER_REF:-helios}"
 
 DOCKER_ARGS=(
   --rm
   --privileged
-  -e "OMARCHY_INSTALLER_REPO=$OMARCHY_INSTALLER_REPO"
-  -e "OMARCHY_INSTALLER_REF=$OMARCHY_INSTALLER_REF"
+  -e "KESTREL_INSTALLER_REPO=$KESTREL_INSTALLER_REPO"
+  -e "KESTREL_INSTALLER_REF=$KESTREL_INSTALLER_REF"
   -e "HOST_UID=$(id -u)"
   -e "HOST_GID=$(id -g)"
   -v "$BUILD_RELEASE_PATH/:/out/"
@@ -57,9 +57,15 @@ DOCKER_ARGS=(
   -v "$BUILD_ROOT/configs:/configs:ro"
 )
 
-# Use local source of Omarchy from $OMARCHY_PATH instead of git checkout
+# Use the local Kestrel checkout instead of a git clone. Defaults to the sibling
+# ../kestrel so the normal layout works with no environment set.
 if [[ -n "${LOCAL_SOURCE-}" ]]; then
-  DOCKER_ARGS+=(-v "$OMARCHY_PATH:/omarchy:ro")
+  LOCAL_SOURCE_PATH="${KESTREL_PATH:-$BUILD_ROOT/../kestrel}"
+  [[ -d $LOCAL_SOURCE_PATH ]] || {
+    echo "Local Kestrel source not found: $LOCAL_SOURCE_PATH" >&2
+    exit 1
+  }
+  DOCKER_ARGS+=(-v "$LOCAL_SOURCE_PATH:/kestrel:ro")
 fi
 
 # Use local pacman cache if you already have one on host to speed up repeat runs
@@ -71,10 +77,15 @@ fi
 if [[ -z "$NO_CACHE" ]]; then
   # using a dated dir on the host to refresh daily if building multiple times
   BUILD_DATE=$(date +%Y-%m-%d)
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/omarchy/iso_${BUILD_DATE}/airootfs/var/cache/omarchy"
+  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/kestrel/iso_${BUILD_DATE}/airootfs/var/cache/kestrel"
   mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
-  # Mount to /var/cache/airootfs/var/cache/omarchy since that's where repo packages go in the ISO
-  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/omarchy")
+  # Mount to /var/cache/airootfs/var/cache/kestrel since that's where repo packages go in the ISO
+  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/kestrel")
+
+  # Mount AUR package build cache
+  AUR_CACHE_DIR="$HOME/.cache/kestrel/aur-packages"
+  mkdir -p "$AUR_CACHE_DIR"
+  DOCKER_ARGS+=(-v "$AUR_CACHE_DIR:/var/cache/aur-packages")
 fi
 
 # Run the builder with assembled args
@@ -82,11 +93,11 @@ docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
 
 # Move as install ref
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-iso_ref="${latest_iso%.*}-$OMARCHY_INSTALLER_REF.iso"
+iso_ref="${latest_iso%.*}-$KESTREL_INSTALLER_REF.iso"
 mv -f "$latest_iso" "$iso_ref"
 
 # Offer to boot the new build
 if [[ -z "$NO_BOOT_OFFER" ]]; then
   echo
-  gum confirm "Boot $iso_ref?" && omarchy-iso-boot "$iso_ref"
+  gum confirm "Boot $iso_ref?" && kestrel-iso-boot "$iso_ref"
 fi

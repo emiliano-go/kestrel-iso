@@ -4,7 +4,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VM_DIR="$(dirname "$SCRIPT_DIR")/vm-saves"
-TMP_DISK="/tmp/omarchy-iso-boot.qcow2"
+TMP_DISK="/tmp/kestrel-iso-boot.qcow2"
 TMP_OVMF="/tmp/OVMF_VARS.4m.fd"
 
 mkdir -p "$VM_DIR"
@@ -19,7 +19,7 @@ save_vm() {
 
   if [[ ! -f "$TMP_DISK" || ! -f "$TMP_OVMF" ]]; then
     echo "Error: No active VM found in /tmp"
-    echo "Boot a VM first with: omarchy-iso-boot [iso]"
+    echo "Boot a VM first with: kestrel-iso-boot [iso]"
     exit 1
   fi
 
@@ -34,7 +34,7 @@ save_vm() {
   mkdir -p "$vm_path"
 
   echo "Saving VM snapshot '$name'..."
-  cp "$TMP_DISK" "$vm_path/omarchy-iso-boot.qcow2"
+  cp "$TMP_DISK" "$vm_path/kestrel-iso-boot.qcow2"
   cp "$TMP_OVMF" "$vm_path/OVMF_VARS.4m.fd"
 
   gum style --foreground 212 "✓ Saved to $vm_path"
@@ -78,12 +78,12 @@ boot_vm() {
   fi
 
   echo "Copying VM '$name' to /tmp..."
-  cp "$vm_path/omarchy-iso-boot.qcow2" "$TMP_DISK"
+  cp "$vm_path/kestrel-iso-boot.qcow2" "$TMP_DISK"
   cp "$vm_path/OVMF_VARS.4m.fd" "$TMP_OVMF"
 
   gum style --foreground 212 "✓ VM ready. Booting..."
 
-  exec omarchy-iso-boot /dev/null reuse
+  exec kestrel-iso-boot /dev/null reuse
 }
 
 case "${1:-}" in
@@ -98,7 +98,7 @@ case "${1:-}" in
     ;;
   *)
     gum style --border rounded --padding "0 1" --border-foreground 212 \
-      "$(gum style --bold 'omarchy-vm') - VM snapshot manager" \
+      "$(gum style --bold 'kestrel-vm') - VM snapshot manager" \
       "" \
       "$(gum style --foreground 245 'Commands:')" \
       "  save [name]  Save current VM from /tmp" \
