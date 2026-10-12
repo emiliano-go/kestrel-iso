@@ -372,10 +372,15 @@ cat <<-_EOF_ >user_configuration.json
         "sys_lang": "en_US.UTF-8"
     },
     "mirror_config": {
-        "custom_repositories": [],
-        "custom_servers": [
-            {"url": "https://geo.mirror.pkgbuild.com/\$repo/os/\$arch"}
+        "custom_repositories": [
+            {
+                "name": "offline",
+                "url": "file:///var/cache/kestrel/mirror/offline",
+                "sign_check": "Optional",
+                "sign_option": "TrustAll"
+            }
         ],
+        "custom_servers": [],
         "mirror_regions": {},
         "optional_repositories": []
     },

@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# Create the dedicated `kestrel` live user, seed its home from the baked skel,
+# and grant passwordless sudo for the installer. Idempotent; runs once before
+# getty@tty1 so the autologin has a user to log in.
+
+set -euo pipefail
+
+user=kestrel
+home=/home/$user
+skel=/usr/local/share/kestrel-live
+
+if ! id -u "$user" >/dev/null 2>&1; then
+  useradd -m -u 1000 -G wheel,video,render,input,audio -s /bin/bash "$user"
+fi
+
+if [[ -d $skel ]]; then
+  # -n keeps anything already in the home (a reboot of a live session reuses it).
+  cp -an "$skel/." "$home/" 2>/dev/null || true
+fi
+
+# The live session's Hyprland autostart is the payload's; append the live-only
+# installer notice so it fires once per session start.
+autostart="$home/.config/hypr/autostart.lua"
+if [[ -f $autostart ]] && ! grep -q 'kestrel-live-notice' "$autostart"; then
+  printf '\n-- Live ISO: point the user at the installer.\no.exec_on_start("kestrel-live-notice")\n' >>"$autostart"
+fi
+
+# The session desktop for uwsm, pointing at the payload's copy.
+mkdir -p /usr/local/share/wayland-sessions
+ln -sfn /usr/share/kestrel/default/wayland-sessions/kestrel.desktop \
+  /usr/local/share/wayland-sessions/kestrel.desktop
+
+# Passwordless sudo for the installer (live only).
+printf '%s\n' "$user ALL=(ALL:ALL) NOPASSWD: ALL" >/etc/sudoers.d/kestrel-live
+chmod 440 /etc/sudoers.d/kestrel-live
+
+chown -R "$user:$user" "$home"
+
+# Session services the shell reads from.
+systemctl enable --now NetworkManager.service 2>/dev/null || true
+systemctl enable upower.service 2>/dev/null || true

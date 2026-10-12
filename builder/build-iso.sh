@@ -53,6 +53,28 @@ else
   git clone -b $KESTREL_INSTALLER_REF https://github.com/$KESTREL_INSTALLER_REPO.git "$build_cache_dir/airootfs/root/kestrel"
 fi
 
+# The live session runs the payload from /usr/share/kestrel, the same layout an
+# installed system uses, so the shell and menu resolve their paths.
+mkdir -p "$build_cache_dir/airootfs/usr/share"
+cp -rp "$build_cache_dir/airootfs/root/kestrel" "$build_cache_dir/airootfs/usr/share/kestrel"
+rm -rf "$build_cache_dir/airootfs/usr/share/kestrel/.git"
+
+# Baked skel for the `kestrel` live user: the shipped user config the init
+# service seeds into its home at boot.
+live_skel="$build_cache_dir/airootfs/usr/local/share/kestrel-live"
+mkdir -p "$live_skel/.config"
+cp -rp "$build_cache_dir/airootfs/root/kestrel/config/." "$live_skel/.config/"
+cp -p "$build_cache_dir/airootfs/root/kestrel/default/bashrc" "$live_skel/.bashrc"
+mkdir -p "$live_skel/.local/share/nautilus-python/extensions"
+cp -rp "$build_cache_dir/airootfs/root/kestrel/default/nautilus-python/extensions/." \
+  "$live_skel/.local/share/nautilus-python/extensions/" 2>/dev/null || true
+mkdir -p "$live_skel/.local/state/kestrel/toggles/hypr"
+cp -rp "$build_cache_dir/airootfs/root/kestrel/default/hypr/toggles/." \
+  "$live_skel/.local/state/kestrel/toggles/hypr/" 2>/dev/null || true
+mkdir -p "$live_skel/.config/kestrel/branding"
+cp -p "$build_cache_dir/airootfs/root/kestrel/icon.txt" "$live_skel/.config/kestrel/branding/about.txt"
+cp -p "$build_cache_dir/airootfs/root/kestrel/logo.txt" "$live_skel/.config/kestrel/branding/screensaver.txt"
+
 # Make log uploader available in the ISO too
 mkdir -p "$build_cache_dir/airootfs/usr/local/bin/"
 cp "$build_cache_dir/airootfs/root/kestrel/bin/kestrel-upload-log" "$build_cache_dir/airootfs/usr/local/bin/kestrel-upload-log"
@@ -82,14 +104,19 @@ echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c - || {
 mkdir -p "$build_cache_dir/airootfs/opt/packages/"
 cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 
-# Add our additional packages to packages.x86_64
+# Live environment packages. Start from the releng set (already in
+# packages.x86_64) and add the full Kestrel desktop so the ISO boots to a
+# graphical Hyprland + Quickshell session. mkarchiso installs these from the
+# bundled [offline] repo below.
 arch_packages=(linux git gum jq openssl plymouth)
-printf '%s\n' "${arch_packages[@]}" >>"$build_cache_dir/packages.x86_64"
+mapfile -t kestrel_desktop < <(grep -hvE '^[[:space:]]*(#|$)' \
+  "$build_cache_dir/airootfs/root/kestrel/install/kestrel-base.packages" \
+  "$build_cache_dir/airootfs/root/kestrel/install/kestrel-other.packages")
+printf '%s\n' "${arch_packages[@]}" "${kestrel_desktop[@]}" >>"$build_cache_dir/packages.x86_64"
 
-# Build list of all the packages needed for the offline mirror
+# Build list of all the packages needed for the offline mirror. The live list
+# already carries the base/other desktop set; add the archinstall substrate.
 all_packages=($(cat "$build_cache_dir/packages.x86_64"))
-all_packages+=($(grep -v '^#' "$build_cache_dir/airootfs/root/kestrel/install/kestrel-base.packages" | grep -v '^$'))
-all_packages+=($(grep -v '^#' "$build_cache_dir/airootfs/root/kestrel/install/kestrel-other.packages" | grep -v '^$'))
 all_packages+=($(grep -v '^#' /builder/archinstall.packages | grep -v '^$'))
 
 # Download all the packages to the offline mirror inside the ISO

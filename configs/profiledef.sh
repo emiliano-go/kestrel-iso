@@ -17,10 +17,13 @@ bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--lon
 file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
-  ["/root/.automated_script.sh"]="0:0:755"
   ["/root/.gnupg"]="0:0:700"
   ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/root/configurator"]="0:0:755"
   ["/var/cache/kestrel/mirror/offline/"]="0:0:775"
   ["/usr/local/bin/kestrel-upload-log"]="0:0:755"
+  ["/usr/local/bin/kestrel-install"]="0:0:755"
+  ["/usr/local/bin/kestrel-live-notice"]="0:0:755"
+  ["/usr/local/lib/kestrel-live-init"]="0:0:755"
+  ["/usr/local/share/kestrel-live"]="0:0:755"
 )

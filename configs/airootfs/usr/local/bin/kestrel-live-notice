@@ -1,0 +1,15 @@
+#!/bin/bash
+
+# Live ISO only: show the "Install Kestrel" invitation once per session.
+# Invoked from the live session's Hyprland autostart.
+
+set -euo pipefail
+
+marker="${XDG_STATE_HOME:-$HOME/.local/state}/kestrel/live-notice-shown"
+[[ -e $marker ]] && exit 0
+
+mkdir -p "$(dirname "$marker")"
+kestrel-notification-send -u critical -g 󰉉 "Install Kestrel" \
+  "Open the Super + D menu and choose Install Kestrel." \
+  --exec kestrel-menu toggle || true
+: >"$marker"

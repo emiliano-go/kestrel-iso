@@ -1,0 +1,12 @@
+[Unit]
+Description=Prepare the Kestrel live session user
+After=local-fs.target
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/lib/kestrel-live-init
+
+[Install]
+WantedBy=multi-user.target
