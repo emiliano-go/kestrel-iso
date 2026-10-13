@@ -13,11 +13,14 @@ skel=/usr/local/share/kestrel-live
 if ! id -u "$user" >/dev/null 2>&1; then
   useradd -m -u 1000 -G wheel,video,render,input,audio -s /bin/bash "$user"
 fi
+echo "kestrel-live-init: user $user ready"
 
 if [[ -d $skel ]]; then
-  # -n keeps anything already in the home (a reboot of a live session reuses it).
-  cp -an "$skel/." "$home/" 2>/dev/null || true
+  # Overwrite: /etc/skel already provides a .bash_profile that useradd -m copied
+  # in, and the live one (which starts the session on tty1) must win.
+  cp -a "$skel/." "$home/" 2>/dev/null || true
 fi
+echo "kestrel-live-init: seeded $home (bash_profile: $(test -e "$home/.bash_profile" && echo present || echo MISSING))"
 
 # The live session's Hyprland autostart is the payload's; append the live-only
 # installer notice so it fires once per session start.

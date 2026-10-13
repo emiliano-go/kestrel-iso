@@ -28,6 +28,17 @@ if [[ ! -f $DISK || $REUSE != "reuse" ]]; then
   cp /usr/share/edk2/x64/OVMF_VARS.4m.fd /tmp/OVMF_VARS.4m.fd
 fi
 
+# Capture everything the guest writes to its serial console, plus qemu's own
+# log, so a failed boot or install can be diagnosed after the fact.
+VM_LOG_DIR="${KESTREL_VM_LOG_DIR:-$HOME/.cache/kestrel/vm-logs}"
+mkdir -p "$VM_LOG_DIR"
+VM_STAMP="$(date +%Y%m%d-%H%M%S)"
+VM_SERIAL_LOG="$VM_LOG_DIR/kestrel-$VM_STAMP-serial.log"
+VM_QEMU_LOG="$VM_LOG_DIR/kestrel-$VM_STAMP-qemu.log"
+echo "VM logs:"
+echo "  serial: $VM_SERIAL_LOG"
+echo "  qemu:   $VM_QEMU_LOG"
+
 # Boot from ISO before we've installed, then boot from drive after
 qemu-system-x86_64 \
   -cpu host -enable-kvm -machine q35,accel=kvm \
@@ -41,6 +52,8 @@ qemu-system-x86_64 \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -device virtio-vga-gl \
   -display gtk,gl=on \
+  -serial "file:$VM_SERIAL_LOG" \
+  -D "$VM_QEMU_LOG" \
   -usb -device usb-tablet \
   -netdev user,id=net0,hostfwd=tcp::2222-:22 \
   -device virtio-net-pci,netdev=net0 \
