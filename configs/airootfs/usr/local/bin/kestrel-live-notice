@@ -9,6 +9,11 @@ marker="${XDG_STATE_HOME:-$HOME/.local/state}/kestrel/live-notice-shown"
 [[ -e $marker ]] && exit 0
 
 mkdir -p "$(dirname "$marker")"
+
+# Wait for the notification service so the toast is not dropped during session
+# startup.
+kestrel-cmd-present kestrel-notification-wait && kestrel-notification-wait || true
+
 kestrel-notification-send -u critical -g 󰉉 "Install Kestrel" \
   "Open the Super + D menu and choose Install Kestrel." \
   --exec kestrel-menu toggle || true
