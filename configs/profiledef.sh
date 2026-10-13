@@ -12,18 +12,18 @@ bootmodes=('bios.syslinux' 'uefi.grub')
 arch="x86_64"
 pacman_conf="pacman.conf"
 airootfs_image_type="squashfs"
-airootfs_image_tool_options=('-comp' 'xz' '-Xbcj' 'x86' '-b' '1M' '-Xdict-size' '1M')
+# zstd compresses in parallel and decompresses far faster than xz, which matters
+# for a live session booted from the ISO.
+airootfs_image_tool_options=('-comp' 'zstd' '-Xcompression-level' '15' '-b' '1M' '-processors' "$(nproc)")
 bootstrap_tarball_compression=('zstd' '-c' '-T0' '--auto-threads=logical' '--long' '-19')
 file_permissions=(
   ["/etc/shadow"]="0:0:400"
   ["/root"]="0:0:750"
   ["/root/.gnupg"]="0:0:700"
-  ["/usr/local/bin/choose-mirror"]="0:0:755"
   ["/root/configurator"]="0:0:755"
-  ["/var/cache/kestrel/mirror/offline/"]="0:0:775"
-  ["/usr/local/bin/kestrel-upload-log"]="0:0:755"
   ["/usr/local/bin/kestrel-install"]="0:0:755"
   ["/usr/local/bin/kestrel-live-notice"]="0:0:755"
   ["/usr/local/lib/kestrel-live-init"]="0:0:755"
+  ["/usr/local/lib/kestrel-target-setup"]="0:0:755"
   ["/usr/local/share/kestrel-live"]="0:0:755"
 )

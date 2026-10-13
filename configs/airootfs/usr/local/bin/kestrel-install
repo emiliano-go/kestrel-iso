@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Live ISO only: install Kestrel onto the target disk from the ISO's bundled
-# offline repository. Launched from the Super + D menu ("Install Kestrel").
+# Live ISO only: install Kestrel onto the target disk by copying the live root
+# filesystem to it (the casper/anaconda model). Launched from the Super + D menu
+# ("Install Kestrel").
 
 set -euo pipefail
 
@@ -17,6 +18,9 @@ export KESTREL_INSTALL_LOG_FILE="/var/log/kestrel-install.log"
 # Installer helpers live on the ISO (this repo owns installation orchestration).
 source /root/helpers/all.sh
 
+TARGET=/mnt
+CRYPT_NAME=cryptroot
+
 # Tokyo Night colors for the installer's virtual console.
 set_tokyo_night_colors() {
   [[ $(tty) == "/dev/tty"* ]] || return 0
@@ -29,121 +33,212 @@ set_tokyo_night_colors() {
   clear
 }
 
-# The configurator (from the ISO's root home) writes user_configuration.json and
-# user_credentials.json next to itself.
+step() {
+  clear_logo
+  echo
+  gum style --foreground 3 --padding "1 0 0 $PADDING_LEFT" "$1"
+  echo
+}
+
+# ── Answers ──────────────────────────────────────────────────────────────────
+# The configurator writes archinstall-shaped JSON; we read only the fields we
+# need and ignore the rest (no archinstall is invoked).
+
+read_answers() {
+  local config=/root/user_configuration.json creds=/root/user_credentials.json
+
+  KESTREL_DEFER=0
+  [[ -e /root/defer-provisioning ]] && KESTREL_DEFER=1
+
+  if ((KESTREL_DEFER)); then
+    KESTREL_USER=""
+    KESTREL_PASSWORD_HASH=""
+    KESTREL_PASSWORD=""
+  else
+    KESTREL_USER="$(jq -r '.users[0].username' "$creds")"
+    KESTREL_PASSWORD_HASH="$(jq -r '.users[0].enc_password' "$creds")"
+    KESTREL_PASSWORD="$(jq -r '.encryption_password // empty' "$creds")"
+  fi
+
+  DISK="$(jq -r '.disk_config.device_modifications[0].device' "$config")"
+  KESTREL_DISK_MODE="$(jq -r '.kestrel_disk_mode // "full"' "$config")"
+  HOSTNAME="$(jq -r '.hostname // "kestrel"' "$config")"
+  TIMEZONE="$(jq -r '.timezone // "UTC"' "$config")"
+  KEYBOARD="$(jq -r '.locale_config.kb_layout // "us"' "$config")"
+  SYS_LANG="$(jq -r '.locale_config.sys_lang // "en_US.UTF-8"' "$config")"
+
+  KESTREL_USER_NAME="$(cat /root/user_full_name.txt 2>/dev/null || true)"
+  KESTREL_USER_EMAIL="$(cat /root/user_email_address.txt 2>/dev/null || true)"
+
+  if jq -e '.disk_config.disk_encryption' "$config" >/dev/null 2>&1; then
+    KESTREL_ENCRYPTED=1
+  else
+    KESTREL_ENCRYPTED=0
+  fi
+
+  # A deferred install re-keys LUKS to the owner's password on first boot, so the
+  # install passphrase is a random throwaway staged as a key file.
+  if ((KESTREL_DEFER && KESTREL_ENCRYPTED)); then
+    KESTREL_LUKS_KEYFILE=/root/kestrel-luks-key
+    head -c 32 /dev/urandom | base64 >"$KESTREL_LUKS_KEYFILE"
+    chmod 600 "$KESTREL_LUKS_KEYFILE"
+  elif ((KESTREL_ENCRYPTED)); then
+    [[ -n $KESTREL_PASSWORD ]] || abort "Encrypted install has no passphrase"
+  fi
+
+  if ((!KESTREL_DEFER)); then
+    [[ -n $KESTREL_USER && $KESTREL_USER != null ]] || abort "No user in credentials"
+  fi
+  [[ -b $DISK ]] || abort "Target disk not found: $DISK"
+}
+
 run_configurator() {
   set_tokyo_night_colors
   (cd /root && ./configurator)
-  KESTREL_USER="$(jq -r '.users[0].username' /root/user_credentials.json)"
-  export KESTREL_USER
 }
 
-install_arch() {
-  clear_logo
-  gum style --foreground 3 --padding "1 0 0 $PADDING_LEFT" "Installing..."
-  echo
+# ── Partition + mount ────────────────────────────────────────────────────────
 
-  touch "$KESTREL_INSTALL_LOG_FILE"
+partition_target() {
+  step "Partitioning $DISK..."
 
-  start_log_output
-  CURRENT_SCRIPT="install_base_system"
-  install_base_system > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>"$KESTREL_INSTALL_LOG_FILE") 2>&1
-  unset CURRENT_SCRIPT
-  stop_log_output
-}
-
-install_kestrel() {
-  clear_logo
-  gum style --foreground 3 --padding "1 0 0 $PADDING_LEFT" "Setting up Kestrel..."
-  echo
-
-  start_log_output
-  CURRENT_SCRIPT="deploy_kestrel"
-  deploy_kestrel > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>"$KESTREL_INSTALL_LOG_FILE") 2>&1
-  unset CURRENT_SCRIPT
-  stop_log_output
-
-  if [[ -f /mnt/var/tmp/kestrel-install-completed ]]; then
-    reboot
+  if [[ $KESTREL_DISK_MODE == "free-space" ]]; then
+    local region
+    region="$(kestrel_largest_free_region "$DISK")" || abort "No usable free space on $DISK"
+    read -r free_start free_end <<<"$region"
+    kestrel_create_partitions "$DISK" "$free_start" "$free_end"
+  else
+    sgdisk -Z "$DISK"
+    kestrel_settle_disk "$DISK"
+    kestrel_create_partitions "$DISK" 2048 0
   fi
+
+  BIOS_PART="$(kestrel_part_path "$DISK" "$KESTREL_PART_BIOS")"
+  ESP_PART="$(kestrel_part_path "$DISK" "$KESTREL_PART_ESP")"
+  ROOT_PART="$(kestrel_part_path "$DISK" "$KESTREL_PART_ROOT")"
+
+  if ((KESTREL_ENCRYPTED)); then
+    if [[ -n ${KESTREL_LUKS_KEYFILE:-} ]]; then
+      cryptsetup luksFormat --type luks2 --pbkdf argon2id --iter-time 2000 \
+        --label kestrel --key-file "$KESTREL_LUKS_KEYFILE" "$ROOT_PART"
+      cryptsetup open --key-file "$KESTREL_LUKS_KEYFILE" "$ROOT_PART" "$CRYPT_NAME"
+    else
+      printf '%s' "$KESTREL_PASSWORD" |
+        cryptsetup luksFormat --type luks2 --pbkdf argon2id --iter-time 2000 \
+          --label kestrel "$ROOT_PART" -
+      printf '%s' "$KESTREL_PASSWORD" |
+        cryptsetup open --key-file - "$ROOT_PART" "$CRYPT_NAME"
+    fi
+    ROOT_DEV="/dev/mapper/$CRYPT_NAME"
+    LUKS_UUID="$(cryptsetup luksUUID "$ROOT_PART")"
+  else
+    ROOT_DEV="$ROOT_PART"
+    LUKS_UUID=""
+  fi
+
+  mkfs.btrfs -f -L kestrel "$ROOT_DEV"
+  mount "$ROOT_DEV" "$TARGET"
+  local sv
+  for sv in @ @home @log @pkg; do btrfs subvolume create "$TARGET/$sv" >/dev/null; done
+  umount "$TARGET"
+
+  mount -o compress=zstd,subvol=@ "$ROOT_DEV" "$TARGET"
+  mkdir -p "$TARGET/home" "$TARGET/var/log" "$TARGET/var/cache/pacman/pkg" "$TARGET/boot"
+  mount -o compress=zstd,subvol=@home "$ROOT_DEV" "$TARGET/home"
+  mount -o compress=zstd,subvol=@log "$ROOT_DEV" "$TARGET/var/log"
+  mount -o compress=zstd,subvol=@pkg "$ROOT_DEV" "$TARGET/var/cache/pacman/pkg"
+
+  mkfs.fat -F32 -n KESTREL "$ESP_PART"
+  mount "$ESP_PART" "$TARGET/boot"
+
+  ESP_UUID="$(blkid -s UUID -o value "$ESP_PART")"
 }
 
-install_base_system() {
-  # Initialize and populate the keyring
-  pacman-key --init
-  pacman-key --populate archlinux
+# ── Copy ─────────────────────────────────────────────────────────────────────
 
-  # Sync the offline database so pacman can find packages
-  pacman -Sy --noconfirm
-
-  # Ensure that no mounts exist from past install attempts
-  findmnt -R /mnt >/dev/null && umount -R /mnt
-
-  # Install using files generated by the configurator. Offline: skip NTP, WKD and
-  # the wireless check; the keyring is pre-populated in the ISO.
-  archinstall \
-    --config /root/user_configuration.json \
-    --creds /root/user_credentials.json \
-    --silent \
-    --skip-ntp \
-    --skip-wkd \
-    --skip-wifi-check
-
-  # After archinstall sets up the base system but before the Kestrel setup runs,
-  # put the offline pacman.conf in place and mount the ISO's bundled repo.
-  cp /etc/pacman.conf /mnt/etc/pacman.conf
-
-  mkdir -p /mnt/var/cache/kestrel/mirror/offline
-  mount --bind /var/cache/kestrel/mirror/offline /mnt/var/cache/kestrel/mirror/offline
-
-  mkdir -p /mnt/opt/packages
-  mount --bind /opt/packages /mnt/opt/packages
+copy_rootfs() {
+  step "Copying the Kestrel system to disk..."
+  rsync -aHAX --numeric-ids --info=progress2 \
+    --exclude=/proc --exclude=/sys --exclude=/dev --exclude=/run \
+    --exclude=/tmp --exclude=/mnt --exclude=/media --exclude=/lost+found \
+    --exclude=/var/tmp --exclude='/var/log/*' --exclude='/var/cache/*' \
+    --exclude=/var/lib/systemd/random-seed --exclude=/var/lib/systemd/timesync \
+    --exclude='/var/lib/pacman/sync/*' --exclude=/etc/machine-id \
+    --exclude='/etc/ssh/ssh_host_*' --exclude=/home/kestrel \
+    --exclude=/root \
+    / "$TARGET/"
 }
 
-# Deploy the payload into the target and run its root-side and per-user setup.
-deploy_kestrel() {
-  local packages
+# ── Target setup (chroot) ────────────────────────────────────────────────────
 
-  # 1. Copy the payload to its installed location.
-  mkdir -p /mnt/usr/share
-  rm -rf /mnt/usr/share/kestrel
-  cp -rp "$KESTREL_PATH" /mnt/usr/share/kestrel
-  rm -rf /mnt/usr/share/kestrel/.git
-  find /mnt/usr/share/kestrel/bin -maxdepth 1 -type f -exec chmod +x {} +
+run_target_setup() {
+  step "Configuring the installed system..."
 
-  # 2. Install the Arch and AUR package set from the ISO's bundled repo. The AUR
-  #    list pins a version as name=version, so strip it for the package name.
-  packages=$(grep -hvE '^[[:space:]]*(#|$)' \
-    /mnt/usr/share/kestrel/install/kestrel-base.packages \
-    /mnt/usr/share/kestrel/install/kestrel-other.packages \
-    /mnt/usr/share/kestrel/install/kestrel-aur.packages |
-    sed -E 's/=.*$//' | sort -u | tr '\n' ' ')
-  chroot_root pacman -S --noconfirm --needed $packages
+  # Hand the answers to the in-chroot script.
+  {
+    printf 'KESTREL_USER=%q\n' "$KESTREL_USER"
+    printf 'KESTREL_PASSWORD_HASH=%q\n' "$KESTREL_PASSWORD_HASH"
+    printf 'KESTREL_USER_NAME=%q\n' "$KESTREL_USER_NAME"
+    printf 'KESTREL_USER_EMAIL=%q\n' "$KESTREL_USER_EMAIL"
+    printf 'KESTREL_HOSTNAME=%q\n' "$HOSTNAME"
+    printf 'KESTREL_TIMEZONE=%q\n' "$TIMEZONE"
+    printf 'KESTREL_KEYBOARD=%q\n' "$KEYBOARD"
+    printf 'KESTREL_SYS_LANG=%q\n' "$SYS_LANG"
+    printf 'KESTREL_DISK=%q\n' "$DISK"
+    printf 'KESTREL_ROOT_DEV=%q\n' "$ROOT_DEV"
+    printf 'KESTREL_ROOT_PART=%q\n' "$ROOT_PART"
+    printf 'KESTREL_LUKS_UUID=%q\n' "$LUKS_UUID"
+    printf 'KESTREL_ESP_UUID=%q\n' "$ESP_UUID"
+    printf 'KESTREL_ENCRYPTED=%q\n' "$KESTREL_ENCRYPTED"
+    printf 'KESTREL_DEFER=%q\n' "$KESTREL_DEFER"
+  } >"$TARGET/root/kestrel-target.env"
 
-  # 3. Root-side setup: deploys Kestrel files, configures the system, and runs
-  #    hardware detection.
-  chroot_root kestrel apply system --install-user "$KESTREL_USER" --first-install
+  install -Dm755 /usr/local/lib/kestrel-target-setup "$TARGET/root/kestrel-target-setup"
+  cp -f /etc/resolv.conf "$TARGET/etc/resolv.conf" 2>/dev/null || true
 
-  # 4. Per-user finalization (skill symlinks, xdg dirs, install/user/*).
-  chroot_user kestrel finalize user --first-install
+  # Stage the throwaway LUKS key for the deferred re-key on first boot.
+  if [[ -n ${KESTREL_LUKS_KEYFILE:-} ]]; then
+    install -Dm600 "$KESTREL_LUKS_KEYFILE" "$TARGET/root/kestrel-luks-key"
+  fi
+
+  arch-chroot "$TARGET" /root/kestrel-target-setup
 }
 
-chroot_root() {
-  arch-chroot /mnt/ env \
-    PATH="/usr/share/kestrel/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
-    "$@"
+finalize_user() {
+  if ((KESTREL_DEFER)); then
+    return 0
+  fi
+  step "Finalizing the user account..."
+  arch-chroot -u "$KESTREL_USER" "$TARGET" \
+    env USER="$KESTREL_USER" HOME="/home/$KESTREL_USER" KESTREL_FIRST_INSTALL=1 \
+    PATH="$KESTREL_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
+    kestrel finalize user --first-install
 }
 
-chroot_user() {
-  arch-chroot -u "$KESTREL_USER" /mnt/ \
-    env \
-    USER="$KESTREL_USER" \
-    HOME="/home/$KESTREL_USER" \
-    KESTREL_FIRST_INSTALL=1 \
-    PATH="/usr/share/kestrel/bin:/usr/local/sbin:/usr/local/bin:/usr/bin" \
-    "$@"
+finish() {
+  # The bundled Node tarball has been consumed (mise-work at install time, or
+  # staged for deferred first boot); it does not belong on the installed system.
+  rm -rf "$TARGET/opt/packages"
+  touch "$TARGET/var/tmp/kestrel-install-completed" 2>/dev/null || true
+  umount -R "$TARGET" 2>/dev/null || true
+  sync
+  reboot
 }
+
+run_logged_phase() {
+  start_log_output
+  CURRENT_SCRIPT="$1"
+  "$1" > >(sed -u 's/\x1b\[[0-9;]*[a-zA-Z]//g' >>"$KESTREL_INSTALL_LOG_FILE") 2>&1
+  unset CURRENT_SCRIPT
+  stop_log_output
+}
+
+touch "$KESTREL_INSTALL_LOG_FILE"
 
 run_configurator
-install_arch
-install_kestrel
+read_answers
+run_logged_phase partition_target
+run_logged_phase copy_rootfs
+run_logged_phase run_target_setup
+run_logged_phase finalize_user
+finish

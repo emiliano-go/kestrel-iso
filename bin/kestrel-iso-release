@@ -17,7 +17,7 @@ else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
-# Sign and upload master ISO
+# Sign master ISO
 latest_master_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*x86_64-master.iso | head -n1)
 release_master_iso="$BUILD_RELEASE_PATH/kestrel-$BULD_VERSION.iso"
 cp "$latest_master_iso" "$release_master_iso"
@@ -27,5 +27,3 @@ kestrel-iso-sign "$release_master_iso"
 
 master_sha=$(sha256sum "$release_master_iso")
 echo -e "\e[32mSHA256 for master ISO: $master_sha\e[0m"
-
-kestrel-iso-upload "$release_master_iso"

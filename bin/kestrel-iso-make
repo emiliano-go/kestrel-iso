@@ -68,24 +68,19 @@ if [[ -n "${LOCAL_SOURCE-}" ]]; then
   DOCKER_ARGS+=(-v "$LOCAL_SOURCE_PATH:/kestrel:ro")
 fi
 
-# Use local pacman cache if you already have one on host to speed up repeat runs
-if [ -d "/var/cache/pacman/pkg" ]; then
-  DOCKER_ARGS+=(-v "/var/cache/pacman/pkg:/var/cache/pacman/pkg")
-fi
+# A dedicated pacman cache, separate from the host's, so the build never reads a
+# differently-built package the system's pacman happens to have under the same
+# name. Persists across runs so repeat builds stay fast.
+PACMAN_CACHE_DIR="$HOME/.cache/kestrel/pacman-pkg"
+mkdir -p "$PACMAN_CACHE_DIR"
+DOCKER_ARGS+=(-v "$PACMAN_CACHE_DIR:/var/cache/pacman/pkg")
 
-# Mount the build cache directory where packages are downloaded
+# Reuse the AUR packages built by previous runs. Arch packages come from the
+# host pacman cache mounted above.
 if [[ -z "$NO_CACHE" ]]; then
-  # using a dated dir on the host to refresh daily if building multiple times
-  BUILD_DATE=$(date +%Y-%m-%d)
-  OFFLINE_REPO_BUILD_CACHE_DIR="$HOME/.cache/kestrel/iso_${BUILD_DATE}/airootfs/var/cache/kestrel"
-  mkdir -p "$OFFLINE_REPO_BUILD_CACHE_DIR"
-  # Mount to /var/cache/airootfs/var/cache/kestrel since that's where repo packages go in the ISO
-  DOCKER_ARGS+=(-v "$OFFLINE_REPO_BUILD_CACHE_DIR:/var/cache/airootfs/var/cache/kestrel")
-
-  # Mount AUR package build cache
   AUR_CACHE_DIR="$HOME/.cache/kestrel/aur-packages"
   mkdir -p "$AUR_CACHE_DIR"
-  DOCKER_ARGS+=(-v "$AUR_CACHE_DIR:/var/cache/aur-packages")
+  DOCKER_ARGS+=(-v "$AUR_CACHE_DIR:/var/cache/aur-packages" -e "KESTREL_AUR_CACHE=/var/cache/aur-packages")
 fi
 
 # Run the builder with assembled args

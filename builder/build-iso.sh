@@ -4,8 +4,10 @@ set -e
 
 # Note that these are packages installed to the Arch container used to build the ISO.
 pacman-key --init
-pacman --noconfirm -Sy archlinux-keyring
-pacman --noconfirm -Sy archiso git sudo base-devel jq grub
+# Full upgrade, not just a sync: the container image can lag the mirrors, and
+# mixing a partial upgrade breaks the Python toolchain the source-package
+# builds rely on (glibc/libm skew).
+pacman --noconfirm -Syu --needed archlinux-keyring archiso git sudo base-devel jq grub
 
 # AUR packages pull multilib dependencies (lib32-zlib, lib32-libglvnd, ...);
 # the base container ships multilib commented out, so enable it.
@@ -14,19 +16,17 @@ if ! grep -q '^\[multilib\]' /etc/pacman.conf; then
   pacman --noconfirm -Sy >/dev/null
 fi
 
-# Setup build locations
+# Setup build locations. There is no offline package mirror: the live rootfs is
+# a fully installed-shaped Kestrel system and the installer copies it to disk.
 build_cache_dir="/var/cache"
-offline_mirror_dir="$build_cache_dir/airootfs/var/cache/kestrel/mirror/offline"
-mkdir -p $build_cache_dir/
-mkdir -p $offline_mirror_dir/
+mkdir -p "$build_cache_dir/"
 
 # We base our ISO on the official arch ISO (releng) config
-cp -r /archiso/configs/releng/* $build_cache_dir/
+cp -r /archiso/configs/releng/* "$build_cache_dir/"
 rm "$build_cache_dir/airootfs/etc/motd"
 
 # The vendored archiso releng list can name packages Arch has since dropped
-# (broadcom-wl, for one). Keep only what the repositories still provide so the
-# offline download step does not abort on an unresolvable target.
+# (broadcom-wl, for one). Keep only what the repositories still provide.
 pacman --noconfirm -Sy >/dev/null
 mapfile -t releng_pkgs <"$build_cache_dir/packages.x86_64"
 : >"$build_cache_dir/packages.x86_64"
@@ -43,154 +43,196 @@ rm -rf "$build_cache_dir/airootfs/etc/systemd/system/multi-user.target.wants/ref
 rm -rf "$build_cache_dir/airootfs/etc/systemd/system/reflector.service.d"
 rm -rf "$build_cache_dir/airootfs/etc/xdg/reflector"
 
-# Bring in our configs
-cp -r /configs/* $build_cache_dir/
+# Bring in our configs (includes the build pacman.conf and the live/target copy).
+cp -r /configs/* "$build_cache_dir/"
 
-# Setup Kestrel itself
-if [[ -d /kestrel ]]; then
-  cp -rp /kestrel "$build_cache_dir/airootfs/root/kestrel"
-else
-  git clone -b $KESTREL_INSTALLER_REF https://github.com/$KESTREL_INSTALLER_REPO.git "$build_cache_dir/airootfs/root/kestrel"
-fi
-
-# The live session runs the payload from /usr/share/kestrel, the same layout an
-# installed system uses, so the shell and menu resolve their paths.
+# Setup Kestrel itself, at the installed-system path the live session and the
+# installer both read.
 mkdir -p "$build_cache_dir/airootfs/usr/share"
-cp -rp "$build_cache_dir/airootfs/root/kestrel" "$build_cache_dir/airootfs/usr/share/kestrel"
+if [[ -d /kestrel ]]; then
+  cp -rp /kestrel "$build_cache_dir/airootfs/usr/share/kestrel"
+else
+  git clone -b "$KESTREL_INSTALLER_REF" "https://github.com/$KESTREL_INSTALLER_REPO.git" \
+    "$build_cache_dir/airootfs/usr/share/kestrel"
+fi
 rm -rf "$build_cache_dir/airootfs/usr/share/kestrel/.git"
 
-# Baked skel for the `kestrel` live user: the shipped user config the init
-# service seeds into its home at boot.
-live_skel="$build_cache_dir/airootfs/usr/local/share/kestrel-live"
-mkdir -p "$live_skel/.config"
-cp -rp "$build_cache_dir/airootfs/root/kestrel/config/." "$live_skel/.config/"
-cp -p "$build_cache_dir/airootfs/root/kestrel/default/bashrc" "$live_skel/.bashrc"
-mkdir -p "$live_skel/.local/share/nautilus-python/extensions"
-cp -rp "$build_cache_dir/airootfs/root/kestrel/default/nautilus-python/extensions/." \
-  "$live_skel/.local/share/nautilus-python/extensions/" 2>/dev/null || true
-mkdir -p "$live_skel/.local/state/kestrel/toggles/hypr"
-cp -rp "$build_cache_dir/airootfs/root/kestrel/default/hypr/toggles/." \
-  "$live_skel/.local/state/kestrel/toggles/hypr/" 2>/dev/null || true
-mkdir -p "$live_skel/.config/kestrel/branding"
-cp -p "$build_cache_dir/airootfs/root/kestrel/icon.txt" "$live_skel/.config/kestrel/branding/about.txt"
-cp -p "$build_cache_dir/airootfs/root/kestrel/logo.txt" "$live_skel/.config/kestrel/branding/screensaver.txt"
-
-# Make log uploader available in the ISO too
-mkdir -p "$build_cache_dir/airootfs/usr/local/bin/"
-cp "$build_cache_dir/airootfs/root/kestrel/bin/kestrel-upload-log" "$build_cache_dir/airootfs/usr/local/bin/kestrel-upload-log"
-
-# Copy the Kestrel Plymouth theme to the ISO
-mkdir -p "$build_cache_dir/airootfs/usr/share/plymouth/themes/kestrel"
-cp -r "$build_cache_dir/airootfs/root/kestrel/default/plymouth/"* "$build_cache_dir/airootfs/usr/share/plymouth/themes/kestrel/"
-
-# Download and verify Node.js binary for offline installation
+# Download and verify the Node.js binary for the offline install.
 NODE_DIST_URL="https://nodejs.org/dist/latest"
-
-# Get checksums and parse filename and SHA
 NODE_SHASUMS=$(curl -fsSL "$NODE_DIST_URL/SHASUMS256.txt")
 NODE_FILENAME=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $2}')
 NODE_SHA=$(echo "$NODE_SHASUMS" | grep "linux-x64.tar.gz" | awk '{print $1}')
-
-# Download the tarball
 curl -fsSL "$NODE_DIST_URL/$NODE_FILENAME" -o "/tmp/$NODE_FILENAME"
-
-# Verify SHA256 checksum
 echo "$NODE_SHA /tmp/$NODE_FILENAME" | sha256sum -c - || {
-    echo "ERROR: Node.js checksum verification failed!"
-    exit 1
+  echo "ERROR: Node.js checksum verification failed!"
+  exit 1
 }
-
-# Copy to ISO
 mkdir -p "$build_cache_dir/airootfs/opt/packages/"
 cp "/tmp/$NODE_FILENAME" "$build_cache_dir/airootfs/opt/packages/"
 
-# Live environment packages. Start from the releng set (already in
-# packages.x86_64) and add the full Kestrel desktop so the ISO boots to a
-# graphical Hyprland + Quickshell session. mkarchiso installs these from the
-# bundled [offline] repo below.
+# Live environment packages: releng set plus the full Kestrel desktop, so the
+# ISO boots to a graphical Hyprland + Quickshell session and the copied rootfs
+# is a complete installed system.
 arch_packages=(linux git gum jq openssl plymouth)
 mapfile -t kestrel_desktop < <(grep -hvE '^[[:space:]]*(#|$)' \
-  "$build_cache_dir/airootfs/root/kestrel/install/kestrel-base.packages" \
-  "$build_cache_dir/airootfs/root/kestrel/install/kestrel-other.packages")
+  "$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-base.packages" \
+  "$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-other.packages")
 printf '%s\n' "${arch_packages[@]}" "${kestrel_desktop[@]}" >>"$build_cache_dir/packages.x86_64"
 
-# Build list of all the packages needed for the offline mirror. The live list
-# already carries the base/other desktop set; add the archinstall substrate.
-all_packages=($(cat "$build_cache_dir/packages.x86_64"))
-all_packages+=($(grep -v '^#' /builder/archinstall.packages | grep -v '^$'))
-
-# Download all the packages to the offline mirror inside the ISO
-mkdir -p /tmp/offlinedb
-pacman --config /configs/pacman-online.conf --noconfirm -Syw "${all_packages[@]}" --cachedir $offline_mirror_dir/ --dbpath /tmp/offlinedb
-repo-add --new "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
-
-# Build AUR packages and add them to the offline mirror. AUR packages can depend
-# on other AUR packages, so build `yay` first and let it resolve the rest of the
-# closure instead of failing on the first missing AUR dependency.
-aur_pkg_list="$build_cache_dir/airootfs/root/kestrel/install/kestrel-aur.packages"
-if [[ -f "$aur_pkg_list" ]] && grep -qvE '^\s*(#|$)' "$aur_pkg_list"; then
-  aur_names=()
+# Build the AUR packages the live rootfs needs into a local build-time repo.
+# AUR packages can depend on other AUR packages, so build `yay` first and let it
+# resolve the rest of the closure. The repo is used only to install these
+# packages into the live rootfs; it is not shipped on the ISO.
+aur_pkg_list="$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-aur.packages"
+aur_repo="/tmp/aur-repo"
+if [[ -f "$aur_pkg_list" ]] && grep -qvE '^[[:space:]]*(#|$)' "$aur_pkg_list"; then
+  # The AUR list is the union of what Kestrel may need per machine. Two entries
+  # cannot be baked into the live rootfs baseline:
+  #   * the pre-Turing NVIDIA 580xx driver hard-conflicts with the modern
+  #     nvidia-open stack the desktop set already ships; hardware detection picks
+  #     the right driver at install.
+  #   * yay resolves `vi` to the repository's ex-vi-compat provider, so it never
+  #     lands as an AUR package; the rootfs ships vim instead.
+  aur_skip=(nvidia-580xx-dkms nvidia-580xx-utils lib32-nvidia-580xx-utils vi)
+  aur_build=()
   while IFS= read -r entry; do
     [[ -z $entry ]] && continue
-    # The list pins a frozen version as name=version.
-    aur_names+=("${entry%%=*}")
-  done < <(grep -vE '^\s*(#|$)' "$aur_pkg_list")
+    name="${entry%%=*}"
+    for skip in "${aur_skip[@]}"; do
+      [[ $name == "$skip" ]] && continue 2
+    done
+    aur_build+=("$name")
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$aur_pkg_list")
 
-  useradd -m builduser
-  echo "builduser ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
-  echo "Defaults:builduser !syslog" >> /etc/sudoers
+  # Persistent across runs when the host cache dir is mounted (see iso-make).
+  aur_pkgdest="${KESTREL_AUR_CACHE:-/tmp/aur-packages}"
+  mkdir -p "$aur_pkgdest" "$aur_repo"
 
-  aur_pkgdest="/tmp/aur-packages"
-  aur_build_dir=/tmp/aur-build
-  mkdir -p "$aur_build_dir" "$aur_pkgdest"
-  chown builduser:builduser "$aur_build_dir" "$aur_pkgdest"
-
-  build_aur() {
-    local pkg="$1" dir="$aur_build_dir/$1"
-    echo "Building AUR package: $pkg"
-    rm -rf "$dir"
-    mkdir -p "$dir"
-    chown builduser:builduser "$dir"
-    su - builduser -c "cd '$dir' && git clone --depth 1 https://aur.archlinux.org/$pkg.git . && PKGDEST='$aur_pkgdest' makepkg -s -f --noconfirm --nocheck"
-  }
-
-  # yay first, so it can resolve AUR dependencies for everything else.
-  build_aur yay
-  pacman -U --noconfirm "$aur_pkgdest"/yay-*.pkg.tar.zst
-
-  yay_names=()
-  for name in "${aur_names[@]}"; do
-    [[ $name == yay ]] && continue
-    yay_names+=("$name")
+  # yay resolves the whole AUR closure (AUR packages depend on each other), so a
+  # complete cache lets us skip building entirely on a repeat run.
+  cache_complete=1
+  for name in "${aur_build[@]}"; do
+    if ! find "$aur_pkgdest" -maxdepth 1 -name "$name-*.pkg.tar.zst" -print -quit | grep -q .; then
+      cache_complete=0
+      break
+    fi
   done
-  echo "Installing AUR closure: ${yay_names[*]}"
-  su - builduser -c "PKGDEST='$aur_pkgdest' yay -S --noconfirm --needed --answerclean None --answerdiff None --removemake --mflags '--nocheck' ${yay_names[*]}"
 
-  # Collect every package built (the pinned list plus any AUR dependencies)
-  # before tearing the build user down; the container is disposable, so a
-  # lingering process must not abort the build.
-  cp "$aur_pkgdest"/*.pkg.tar.zst "$offline_mirror_dir/" 2>/dev/null || true
+  if ((cache_complete)); then
+    echo "All AUR packages found in cache; skipping AUR build"
+    cp "$aur_pkgdest"/*.pkg.tar.zst "$aur_repo/"
+  else
+    useradd -m builduser
+    echo "builduser ALL=(ALL) NOPASSWD: ALL" >>/etc/sudoers
+    echo "Defaults:builduser !syslog" >>/etc/sudoers
+
+    aur_build_dir=/tmp/aur-build
+    mkdir -p "$aur_build_dir"
+    chown builduser:builduser "$aur_build_dir" "$aur_pkgdest"
+
+    # yay first, so it can resolve AUR dependencies for everything else.
+    su - builduser -c "rm -rf '$aur_build_dir/yay' && git clone --depth 1 https://aur.archlinux.org/yay.git '$aur_build_dir/yay' && cd '$aur_build_dir/yay' && PKGDEST='$aur_pkgdest' makepkg -s -f --noconfirm --nocheck"
+    pacman -U --noconfirm "$aur_pkgdest"/yay-*.pkg.tar.zst
+
+    # Some AUR PKGBUILDs need a library only at build time that they declare as a
+    # runtime dependency (makepkg -s installs makedepends, not depends), so yay
+    # alone misses it. gtk4 is the one that bites the share picker today.
+    pacman -S --noconfirm --needed gtk4 libadwaita >/dev/null
+
+    yay_targets=()
+    for name in "${aur_build[@]}"; do
+      [[ $name == yay ]] && continue
+      yay_targets+=("$name")
+    done
+    echo "Installing AUR closure: ${yay_targets[*]}"
+    su - builduser -c "PKGDEST='$aur_pkgdest' yay -S --noconfirm --needed --answerclean None --answerdiff None --removemake --mflags '--nocheck' ${yay_targets[*]}"
+
+    pkill -u builduser 2>/dev/null || true
+    userdel -r builduser 2>/dev/null || true
+
+    # Publish every built package into the build-time repo mkarchiso installs from.
+    cp "$aur_pkgdest"/*.pkg.tar.zst "$aur_repo/"
+  fi
+
+  repo-add --new "$aur_repo/aur.db.tar.gz" "$aur_repo/"*.pkg.tar.zst
+
+  # Install into the live rootfs only the AUR packages we actually have a built
+  # package for, so a name yay resolved to a repo provider never reaches pacstrap.
+  for name in "${aur_build[@]}"; do
+    compgen -G "$aur_repo/$name-*.pkg.tar.zst" >/dev/null || continue
+    printf '%s\n' "$name" >>"$build_cache_dir/packages.x86_64"
+  done
+
+  printf '\n[aur]\nSigLevel = Optional TrustAll\nServer = file://%s/\n' "$aur_repo" \
+    >>"$build_cache_dir/pacman.conf"
+fi
+
+# Build packages Kestrel ships from source (a git repository rather than the
+# AUR) into the same build-time repo. Format: name=git-url. The recipe is the
+# repository's local PKGBUILD, which builds the checked-out tree itself.
+source_pkg_list="$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-source.packages"
+if [[ -f "$source_pkg_list" ]] && grep -qvE '^[[:space:]]*(#|$)' "$source_pkg_list"; then
+  useradd -m builduser 2>/dev/null || true
+  echo "builduser ALL=(ALL) NOPASSWD: ALL" >>/etc/sudoers
+  echo "Defaults:builduser !syslog" >>/etc/sudoers
+  mkdir -p "$aur_repo"
+  chown builduser:builduser "$aur_repo"
+
+  while IFS= read -r entry; do
+    [[ -z $entry ]] && continue
+    name="${entry%%=*}"
+    url="${entry#*=}"
+    echo "Building source package: $name from $url"
+    src_dir="/tmp/src/$name"
+    rm -rf "$src_dir"
+    git clone --quiet "$url" "$src_dir"
+    pkgbuild_dir="$src_dir/packaging/local"
+    [[ -d $pkgbuild_dir ]] || pkgbuild_dir="$src_dir"
+    chown -R builduser:builduser "$src_dir"
+    su - builduser -c "cd '$pkgbuild_dir' && PKGDEST='$aur_repo' makepkg -s -f --noconfirm --nocheck"
+    rm -rf "$src_dir"
+    printf '%s\n' "$name" >>"$build_cache_dir/packages.x86_64"
+  done < <(grep -vE '^[[:space:]]*(#|$)' "$source_pkg_list")
+
   pkill -u builduser 2>/dev/null || true
   userdel -r builduser 2>/dev/null || true
 
-  # Rebuild repo database to include AUR packages
-  repo-add --new "$offline_mirror_dir/offline.db.tar.gz" "$offline_mirror_dir/"*.pkg.tar.zst
+  repo-add "$aur_repo/aur.db.tar.gz" "$aur_repo/"*.pkg.tar.zst
+
+  if ! grep -q '^\[aur\]' "$build_cache_dir/pacman.conf"; then
+    printf '\n[aur]\nSigLevel = Optional TrustAll\nServer = file://%s/\n' "$aur_repo" \
+      >>"$build_cache_dir/pacman.conf"
+  fi
 fi
 
-# Create a symlink to the offline mirror instead of duplicating it.
-# mkarchiso needs packages at /var/cache/kestrel/mirror/offline in the container,
-# but they're actually in $build_cache_dir/airootfs/var/cache/kestrel/mirror/offline
-mkdir -p /var/cache/kestrel/mirror
-ln -s "$offline_mirror_dir" "/var/cache/kestrel/mirror/offline"
-
-# Copy the pacman.conf to the ISO's /etc directory so the live environment uses our
-# same config when booted
-cp $build_cache_dir/pacman.conf "$build_cache_dir/airootfs/etc/pacman.conf"
+# Live-only packages: everything the releng live set adds on top of the
+# installed Kestrel system. The installer removes these from the target (A3).
+# Leaf packages the installed system still wants that only releng provides are
+# listed as essentials; anything required by a kept package is protected at
+# install time anyway.
+installed_essentials=(mkinitcpio sudo openssh cryptsetup pciutils usbutils man-pages vim nano)
+keep_list=$(
+  grep -hvE '^[[:space:]]*(#|$)' \
+    "$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-base.packages" \
+    "$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-other.packages" |
+    sed -E 's/=.*$//'
+  printf '%s\n' "${arch_packages[@]}" "${installed_essentials[@]}"
+)
+live_only_file="$build_cache_dir/airootfs/usr/share/kestrel/install/kestrel-live-only.packages"
+{
+  echo "# Generated by build-iso.sh: releng/live-only packages the installer"
+  echo "# removes from the target. Do not edit by hand."
+  for pkg in "${releng_pkgs[@]}"; do
+    [[ -n $pkg ]] || continue
+    grep -qxF "$pkg" <<<"$keep_list" && continue
+    printf '%s\n' "$pkg"
+  done
+} >"$live_only_file"
 
 # Finally, we assemble the entire ISO
 mkarchiso -v -w "$build_cache_dir/work/" -o "/out/" "$build_cache_dir/"
 
 # Fix ownership of output files to match host user
 if [ -n "$HOST_UID" ] && [ -n "$HOST_GID" ]; then
-    chown -R "$HOST_UID:$HOST_GID" /out/
+  chown -R "$HOST_UID:$HOST_GID" /out/
 fi

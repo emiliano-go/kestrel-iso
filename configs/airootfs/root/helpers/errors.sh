@@ -109,11 +109,6 @@ catch_errors() {
       options+=("Retry installation")
     fi
 
-    # Add upload option if internet is available
-    if ping -c 1 -W 1 1.1.1.1 >/dev/null 2>&1; then
-      options+=("Upload log for support")
-    fi
-
     # Add remaining options
     options+=("View full log")
     options+=("Exit")
@@ -122,8 +117,7 @@ catch_errors() {
 
     case "$choice" in
     "Retry installation")
-      bash /root/.automated_script.sh
-      break
+      exec kestrel-install
       ;;
     "View full log")
       if command -v less &>/dev/null; then
@@ -131,9 +125,6 @@ catch_errors() {
       else
         tail "$KESTREL_INSTALL_LOG_FILE"
       fi
-      ;;
-    "Upload log for support")
-      kestrel-upload-log
       ;;
     "Exit" | "")
       exit 1

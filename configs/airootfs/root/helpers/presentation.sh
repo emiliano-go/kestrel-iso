@@ -46,3 +46,12 @@ clear_logo() {
   printf "\033[H\033[2J" # Clear screen and move cursor to top-left
   gum style --foreground 2 --padding "1 0 0 $PADDING_LEFT" "$(<"$LOGO_PATH")"
 }
+
+# Stop with a readable message on an unrecoverable installer error.
+abort() {
+  clear_logo
+  echo
+  gum style --foreground 1 "Kestrel installation stopped: ${1:-unknown error}"
+  echo
+  exit 1
+}

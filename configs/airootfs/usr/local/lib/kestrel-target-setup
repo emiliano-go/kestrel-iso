@@ -1,0 +1,236 @@
+#!/bin/bash
+
+# Runs inside the freshly-copied target root (arch-chroot) to personalize it
+# into a bootable installed Kestrel system. The live-side orchestrator writes
+# /root/kestrel-target.env and removes this script's leftovers afterwards.
+
+set -euo pipefail
+
+# shellcheck disable=SC1091
+source /root/kestrel-target.env
+
+export KESTREL_PATH=/usr/share/kestrel
+export KESTREL_INSTALL="$KESTREL_PATH/install"
+export KESTREL_INSTALL_LOG_FILE=/var/log/kestrel-install.log
+export PATH="$KESTREL_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/bin"
+
+# ── Identity ─────────────────────────────────────────────────────────────────
+
+write_fstab() {
+  {
+    printf 'UUID=%s /boot vfat fmask=0137,dmask=0027 0 2\n' "$KESTREL_ESP_UUID"
+    printf '%s / btrfs subvol=/@,compress=zstd 0 0\n' "$KESTREL_ROOT_DEV"
+    printf '%s /home btrfs subvol=/@home,compress=zstd 0 0\n' "$KESTREL_ROOT_DEV"
+    printf '%s /var/log btrfs subvol=/@log,compress=zstd 0 0\n' "$KESTREL_ROOT_DEV"
+    printf '%s /var/cache/pacman/pkg btrfs subvol=/@pkg,compress=zstd 0 0\n' "$KESTREL_ROOT_DEV"
+  } >/etc/fstab
+
+  if ((KESTREL_ENCRYPTED)); then
+    printf 'cryptroot UUID=%s none luks\n' "$KESTREL_LUKS_UUID" >/etc/crypttab
+  else
+    rm -f /etc/crypttab
+  fi
+}
+
+set_identity() {
+  rm -f /etc/machine-id
+  systemd-machine-id-setup
+  ssh-keygen -A
+
+  printf '%s\n' "$KESTREL_HOSTNAME" >/etc/hostname
+  cat >/etc/hosts <<EOF
+127.0.0.1 localhost
+::1 localhost
+127.0.1.1 $KESTREL_HOSTNAME.localdomain $KESTREL_HOSTNAME
+EOF
+
+  printf 'LANG=%s\n' "$KESTREL_SYS_LANG" >/etc/locale.conf
+  grep -qxF "$KESTREL_SYS_LANG UTF-8" /etc/locale.gen ||
+    printf '%s UTF-8\n' "$KESTREL_SYS_LANG" >>/etc/locale.gen
+  locale-gen
+
+  printf 'KEYMAP=%s\n' "$KESTREL_KEYBOARD" >/etc/vconsole.conf
+
+  ln -sfn "/usr/share/zoneinfo/$KESTREL_TIMEZONE" /etc/localtime
+  hwclock --systohc 2>/dev/null || true
+}
+
+create_user() {
+  local gecos=()
+  [[ -n $KESTREL_USER_NAME ]] && gecos=(-c "$KESTREL_USER_NAME")
+
+  useradd -m "${gecos[@]}" -G wheel,video,render,input,audio -s /bin/bash "$KESTREL_USER"
+  printf '%s:%s\n' "$KESTREL_USER" "$KESTREL_PASSWORD_HASH" | chpasswd -e
+  printf 'root:%s\n' "$KESTREL_PASSWORD_HASH" | chpasswd -e
+
+  if [[ -n $KESTREL_USER_EMAIL ]]; then
+    printf 'KESTREL_USER_NAME=%q\nKESTREL_USER_EMAIL=%q\n' \
+      "$KESTREL_USER_NAME" "$KESTREL_USER_EMAIL" >"/home/$KESTREL_USER/.kestrel-identity"
+    chown "$KESTREL_USER:$KESTREL_USER" "/home/$KESTREL_USER/.kestrel-identity"
+  fi
+}
+
+# ── Strip live-only ──────────────────────────────────────────────────────────
+
+strip_live_only() {
+  # Packages the ISO added on top of the installed set.
+  local list=/usr/share/kestrel/install/kestrel-live-only.packages
+  if [[ -f $list ]]; then
+    local -a cand removable=()
+    mapfile -t cand < <(grep -vE '^[[:space:]]*(#|$)' "$list")
+    local pkg req r keep
+    for pkg in "${cand[@]}"; do
+      pacman -Qq "$pkg" >/dev/null 2>&1 || continue
+      req=$(pacman -Qi "$pkg" 2>/dev/null | sed -n 's/^Required By *: *//p')
+      keep=0
+      for r in $req; do
+        [[ $r == None ]] && continue
+        if ! printf '%s\n' "${cand[@]}" | grep -qxF "$r"; then
+          keep=1
+          break
+        fi
+      done
+      ((keep)) || removable+=("$pkg")
+    done
+    ((${#removable[@]})) && pacman -Rns --noconfirm "${removable[@]}" || true
+  fi
+
+  # Live-only files and releng/archiso state.
+  rm -f /etc/systemd/system/kestrel-live-init.service \
+    /etc/systemd/system/multi-user.target.wants/kestrel-live-init.service \
+    /etc/systemd/system/getty@tty1.service.d/autologin.conf
+  rmdir /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+  rm -f /usr/local/bin/kestrel-install /usr/local/bin/kestrel-live-notice \
+    /usr/local/lib/kestrel-live-init /etc/profile.d/kestrel-live.sh \
+    /etc/sudoers.d/kestrel-live
+  rm -rf /usr/local/share/kestrel-live
+
+  rm -f /etc/mkinitcpio.conf.d/archiso.conf \
+    /etc/modprobe.d/broadcom-wl.conf \
+    /etc/pacman.d/hooks/uncomment-mirrors.hook \
+    /etc/pacman.d/hooks/zzzz99-remove-custom-hooks-from-airootfs.hook \
+    /etc/ssh/sshd_config.d/10-archiso.conf \
+    /etc/systemd/journald.conf.d/volatile-storage.conf \
+    /etc/systemd/logind.conf.d/do-not-suspend.conf \
+    /etc/systemd/network/20-ethernet.network \
+    /etc/systemd/network/20-wlan.network \
+    /etc/systemd/network/20-wwan.network \
+    /etc/systemd/networkd.conf.d/ipv6-privacy-extensions.conf \
+    /etc/systemd/resolved.conf.d/archiso.conf \
+    /etc/systemd/system/choose-mirror.service \
+    /etc/systemd/system/pacman-init.service \
+    /etc/systemd/system/dbus-org.freedesktop.ModemManager1.service \
+    /etc/systemd/system/dbus-org.freedesktop.network1.service \
+    /etc/systemd/system/dbus-org.freedesktop.resolve1.service \
+    /etc/systemd/system/dbus-org.freedesktop.timesync1.service \
+    /etc/systemd/system/etc-pacman.d-gnupg.mount \
+    /etc/systemd/system-generators/systemd-gpt-auto-generator \
+    /etc/systemd/system/livecd-alsa-unmuter.service \
+    /etc/systemd/system/livecd-talk.service \
+    /etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service \
+    /etc/systemd/system/multi-user.target.wants/choose-mirror.service \
+    /etc/systemd/system/multi-user.target.wants/iwd.service \
+    /etc/systemd/system/multi-user.target.wants/livecd-talk.service \
+    /etc/systemd/system/multi-user.target.wants/ModemManager.service \
+    /etc/systemd/system/multi-user.target.wants/pacman-init.service \
+    /etc/systemd/system/multi-user.target.wants/sshd.service \
+    /etc/systemd/system/multi-user.target.wants/systemd-networkd.service \
+    /etc/systemd/system/multi-user.target.wants/systemd-resolved.service \
+    /etc/systemd/system/multi-user.target.wants/vboxservice.service \
+    /etc/systemd/system/multi-user.target.wants/vmtoolsd.service \
+    /etc/systemd/system/multi-user.target.wants/vmware-vmblock-fuse.service \
+    /etc/systemd/system/multi-user.target.wants/hv_fcopy_daemon.service \
+    /etc/systemd/system/multi-user.target.wants/hv_kvp_daemon.service \
+    /etc/systemd/system/multi-user.target.wants/hv_vss_daemon.service \
+    /etc/systemd/system/sockets.target.wants/systemd-networkd.socket \
+    /etc/systemd/system/sound.target.wants/livecd-alsa-unmuter.service \
+    /usr/local/bin/choose-mirror /usr/local/bin/Installation_guide \
+    /usr/local/bin/livecd-sound /root/.automated_script.sh /root/.zlogin
+  rm -rf /usr/local/share/livecd-sound /etc/systemd/system/cloud-init.target.wants
+
+  # systemd-resolved owns resolv.conf on the installed system.
+  ln -sfn /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
+
+  # Live credentials never reach the target.
+  [[ -n ${KESTREL_USER:-} ]] && userdel "$KESTREL_USER" 2>/dev/null || true
+}
+
+# ── Deferred provisioning ────────────────────────────────────────────────────
+
+stage_deferred() {
+  ((KESTREL_DEFER)) || return 0
+
+  mkdir -p /var/lib/kestrel/provisioning/packages
+  cp /opt/packages/node-*.tar.gz /var/lib/kestrel/provisioning/packages/ 2>/dev/null || true
+
+  install -Dm644 "$KESTREL_PATH/install/provisioning/kestrel-provision-owner.service" \
+    /etc/systemd/system/kestrel-provision-owner.service
+  systemctl enable kestrel-provision-owner.service
+
+  if ((KESTREL_ENCRYPTED)); then
+    install -Dm600 /root/kestrel-luks-key /var/lib/kestrel/provisioning/luks-key
+    install -Dm600 /root/kestrel-luks-key /etc/kestrel/provisioning.key
+    printf 'FILES+=(/etc/kestrel/provisioning.key)\n' \
+      >/etc/mkinitcpio.conf.d/99-kestrel-provisioning-key.conf
+  fi
+
+  # Written last: kestrel-provision-owner keys off this marker.
+  : >/var/lib/kestrel/provisioning/pending
+  rm -f /root/kestrel-luks-key
+}
+
+# ── Boot ─────────────────────────────────────────────────────────────────────
+
+write_limine_config() {
+  local cmdline
+  if ((KESTREL_ENCRYPTED)); then
+    cmdline="cryptdevice=UUID=$KESTREL_LUKS_UUID:cryptroot root=/dev/mapper/cryptroot rootflags=subvol=@"
+    if ((KESTREL_DEFER)); then
+      cmdline+=" cryptkey=rootfs:/etc/kestrel/provisioning.key"
+    fi
+  else
+    cmdline="root=$KESTREL_ROOT_PART rootflags=subvol=@"
+  fi
+
+  cat >/etc/default/limine <<EOF
+ESP_PATH="/boot"
+
+KERNEL_CMDLINE[default]+=" $cmdline"
+EOF
+}
+
+build_boot() {
+  # The archiso preset is for the live image only; restore the standard preset.
+  rm -f /etc/mkinitcpio.conf.d/archiso.conf /etc/mkinitcpio.d/linux.preset
+  sed "s|%PKGBASE%|linux|g" /usr/share/mkinitcpio/hook.preset >/etc/mkinitcpio.d/linux.preset
+  [[ -e /boot/vmlinuz-linux ]] || install -Dm644 "$(echo /usr/lib/modules/*/vmlinuz)" /boot/vmlinuz-linux
+  mkinitcpio -P
+
+  if [[ -d /sys/firmware/efi ]]; then
+    limine-install
+  else
+    limine bios-install "$KESTREL_DISK"
+  fi
+  limine-mkinitcpio
+  limine-update
+  limine-snapper-sync 2>/dev/null || true
+}
+
+# ── Run ──────────────────────────────────────────────────────────────────────
+
+write_fstab
+set_identity
+((KESTREL_DEFER)) || create_user
+strip_live_only
+
+if ((KESTREL_DEFER)); then
+  kestrel apply system --defer-provisioning --first-install
+  stage_deferred
+else
+  kestrel apply system --install-user "$KESTREL_USER" --first-install
+fi
+
+write_limine_config
+build_boot
+
+rm -f /root/kestrel-target-setup /root/kestrel-target.env /root/kestrel-luks-key
