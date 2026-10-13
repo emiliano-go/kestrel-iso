@@ -23,7 +23,7 @@ Caches live under `~/.cache/kestrel/`: `pacman-pkg/` for Arch packages, and `aur
 
 ### Environment variables
 
-- `KESTREL_INSTALLER_REPO` the GitHub repository for the payload (default: `emiliano-go/kestrel`).
+- `KESTREL_INSTALLER_REPO` the GitHub repository for the payload (default: `kestrel-distro/kestrel`).
 - `KESTREL_INSTALLER_REF` the git ref (branch or tag) for the payload (default: `main`). Ignored with `--local-source`.
 
 ```bash

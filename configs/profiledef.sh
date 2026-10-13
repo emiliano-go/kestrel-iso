@@ -3,7 +3,7 @@
 
 iso_name="kestrel"
 iso_label="kestrel_$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y%m)"
-iso_publisher="Kestrel <https://github.com/emiliano-go/kestrel>"
+iso_publisher="Kestrel <https://github.com/kestrel-distro/kestrel>"
 iso_application="Kestrel Installer"
 iso_version="$(date --date="@${SOURCE_DATE_EPOCH:-$(date +%s)}" +%Y.%m.%d)"
 install_dir="arch"
