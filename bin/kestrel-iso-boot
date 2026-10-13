@@ -38,6 +38,7 @@ VM_QEMU_LOG="$VM_LOG_DIR/kestrel-$VM_STAMP-qemu.log"
 echo "VM logs:"
 echo "  serial: $VM_SERIAL_LOG"
 echo "  qemu:   $VM_QEMU_LOG"
+echo "VM input: hover the window to grab the keyboard and mouse; Ctrl+Alt+G releases."
 
 # Boot from ISO before we've installed, then boot from drive after
 qemu-system-x86_64 \
@@ -51,7 +52,7 @@ qemu-system-x86_64 \
   -drive file="$ISO",media=cdrom,if=none,format=raw,id=cdrom0 \
   -device ide-cd,drive=cdrom0,bootindex=2 \
   -device virtio-vga-gl \
-  -display gtk,gl=on \
+  -display gtk,gl=on,grab-on-hover=on \
   -serial "file:$VM_SERIAL_LOG" \
   -D "$VM_QEMU_LOG" \
   -usb -device usb-tablet \
