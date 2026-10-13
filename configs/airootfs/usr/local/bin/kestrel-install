@@ -219,6 +219,7 @@ finish() {
   # The bundled Node tarball has been consumed (mise-work at install time, or
   # staged for deferred first boot); it does not belong on the installed system.
   rm -rf "$TARGET/opt/packages"
+  mirror_install_log
   touch "$TARGET/var/tmp/kestrel-install-completed" 2>/dev/null || true
   umount -R "$TARGET" 2>/dev/null || true
   sync
@@ -234,6 +235,20 @@ run_logged_phase() {
 }
 
 touch "$KESTREL_INSTALL_LOG_FILE"
+
+# The Kestrel VM helper shares the host log directory as a 9p mount tagged
+# kestrel_host_logs. Mirror the installer log there (and into the target) so a
+# failed install can still be read from the host or the installed system.
+KESTREL_HOST_LOG_DIR=/mnt/kestrel-host-logs
+mirror_install_log() {
+  install -Dm644 "$KESTREL_INSTALL_LOG_FILE" "$TARGET/var/log/kestrel-install.log" 2>/dev/null || true
+  mkdir -p "$KESTREL_HOST_LOG_DIR"
+  if mountpoint -q "$KESTREL_HOST_LOG_DIR" ||
+    mount -t 9p -o trans=virtio,version=9p2000.L kestrel_host_logs "$KESTREL_HOST_LOG_DIR" 2>/dev/null; then
+    cp -f "$KESTREL_INSTALL_LOG_FILE" "$KESTREL_HOST_LOG_DIR/" 2>/dev/null || true
+  fi
+}
+trap mirror_install_log EXIT
 
 run_configurator
 read_answers
