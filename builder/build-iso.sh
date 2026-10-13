@@ -192,6 +192,10 @@ if [[ -f "$source_pkg_list" ]] && grep -qvE '^[[:space:]]*(#|$)' "$source_pkg_li
     su - builduser -c "cd '$pkgbuild_dir' && PKGDEST='$aur_repo' makepkg -s -f --noconfirm --nocheck"
     rm -rf "$src_dir"
     printf '%s\n' "$name" >>"$build_cache_dir/packages.x86_64"
+    # Kernels ship a -headers package that DKMS (NVIDIA, etc.) needs to rebuild
+    # against. Install it when the build produced one.
+    compgen -G "$aur_repo/$name-headers-*.pkg.tar.zst" >/dev/null &&
+      printf '%s\n' "$name-headers" >>"$build_cache_dir/packages.x86_64"
   done < <(grep -vE '^[[:space:]]*(#|$)' "$source_pkg_list")
 
   pkill -u builduser 2>/dev/null || true
