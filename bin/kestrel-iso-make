@@ -41,7 +41,7 @@ BUILD_RELEASE_PATH="$BUILD_ROOT/release"
 mkdir -p "$BUILD_RELEASE_PATH"
 
 KESTREL_INSTALLER_REPO="${KESTREL_INSTALLER_REPO:-emiliano-go/kestrel}"
-KESTREL_INSTALLER_REF="${KESTREL_INSTALLER_REF:-helios}"
+KESTREL_INSTALLER_REF="${KESTREL_INSTALLER_REF:-main}"
 
 DOCKER_ARGS=(
   --rm
@@ -86,10 +86,14 @@ fi
 # Run the builder with assembled args
 docker run "${DOCKER_ARGS[@]}" archlinux/archlinux:latest /$BUILD_SCRIPT
 
-# Move as install ref
+# Tag non-default builds with their ref so branches do not overwrite each
+# other; the default branch needs no suffix.
 latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*.iso | head -n1)
-iso_ref="${latest_iso%.*}-$KESTREL_INSTALLER_REF.iso"
-mv -f "$latest_iso" "$iso_ref"
+iso_ref="$latest_iso"
+if [[ $KESTREL_INSTALLER_REF != main ]]; then
+  iso_ref="${latest_iso%.*}-$KESTREL_INSTALLER_REF.iso"
+  mv -f "$latest_iso" "$iso_ref"
+fi
 
 # Offer to boot the new build
 if [[ -z "$NO_BOOT_OFFER" ]]; then

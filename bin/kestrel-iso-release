@@ -11,19 +11,19 @@ BULD_VERSION="$1"
 
 # Make ISOs
 if [[ $1 != "--no-make" ]]; then
-  echo -e "\e[32mMaking master ISO\e[0m"
-  KESTREL_INSTALLER_REF=master kestrel-iso-make --no-cache --no-boot-offer
+  echo -e "\e[32mMaking ISO\e[0m"
+  KESTREL_INSTALLER_REF=main kestrel-iso-make --no-cache --no-boot-offer
 else
   echo -e "\e[31mSkipping remaking ISOs\e[0m"
 fi
 
-# Sign master ISO
-latest_master_iso=$(\ls -t "$BUILD_RELEASE_PATH"/*x86_64-master.iso | head -n1)
-release_master_iso="$BUILD_RELEASE_PATH/kestrel-$BULD_VERSION.iso"
-cp "$latest_master_iso" "$release_master_iso"
+# Sign ISO
+latest_iso=$(\ls -t "$BUILD_RELEASE_PATH"/kestrel-*-x86_64.iso | head -n1)
+release_iso="$BUILD_RELEASE_PATH/kestrel-$BULD_VERSION.iso"
+cp "$latest_iso" "$release_iso"
 
-echo -e "\e[32mSigning master ISO\e[0m"
-kestrel-iso-sign "$release_master_iso"
+echo -e "\e[32mSigning ISO\e[0m"
+kestrel-iso-sign "$release_iso"
 
-master_sha=$(sha256sum "$release_master_iso")
-echo -e "\e[32mSHA256 for master ISO: $master_sha\e[0m"
+iso_sha=$(sha256sum "$release_iso")
+echo -e "\e[32mSHA256 for ISO: $iso_sha\e[0m"
