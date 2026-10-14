@@ -23,9 +23,17 @@ while [[ $# -gt 0 ]]; do
     KESTREL_INSTALLER_REF=dev
     shift
     ;;
+  --vault)
+    VAULT_DIR="$2"
+    shift 2
+    ;;
+  --vault-size)
+    VAULT_SIZE="$2"
+    shift 2
+    ;;
   *)
     echo "Unknown option: $1"
-    echo "Usage: $0 [--no-cache] [--no-boot-offer] [--local-source] [--dev]"
+    echo "Usage: $0 [--no-cache] [--no-boot-offer] [--local-source] [--dev] [--vault FOLDER] [--vault-size SIZE]"
     exit 1
     ;;
   esac
@@ -93,6 +101,16 @@ iso_ref="$latest_iso"
 if [[ $KESTREL_INSTALLER_REF != main ]]; then
   iso_ref="${latest_iso%.*}-$KESTREL_INSTALLER_REF.iso"
   mv -f "$latest_iso" "$iso_ref"
+fi
+
+# Embed the encrypted vault, if a folder was given. This is the same injection
+# path as the post-build tool (kestrel-iso-vault add), so a vault built into a
+# fresh ISO and one added to a compiled ISO behave identically.
+if [[ -n ${VAULT_DIR:-} ]]; then
+  vault_args=(add "$iso_ref" "$VAULT_DIR" --out "$iso_ref.vault.iso")
+  [[ -n ${VAULT_SIZE:-} ]] && vault_args+=(--size "$VAULT_SIZE")
+  "${BASH_SOURCE[0]%/*}/kestrel-iso-vault" "${vault_args[@]}"
+  mv -f "$iso_ref.vault.iso" "$iso_ref"
 fi
 
 # Offer to boot the new build

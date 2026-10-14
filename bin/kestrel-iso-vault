@@ -1,0 +1,224 @@
+#!/bin/bash
+
+# kestrel-iso-vault: embed a LUKS2-encrypted folder ("vault") into a Kestrel ISO.
+#
+# The vault is a LUKS2 container holding an ext4 filesystem, placed at
+# /kestrel/vault.img on the ISO's ISO9660 filesystem (outside the squashfs), so
+# the live system can read it without unpacking the root, and so it can be
+# injected into an already-built ISO.
+#
+# The container is read-only at rest. At runtime the live system unlocks it with
+# a passphrase and layers a copy-on-write store on top, so the vault appears
+# writable for the session and the changes are discarded on lock. See
+# kestrel-vault(1) in the kestrel repository.
+#
+# Usage:
+#   kestrel-iso-vault add    <in.iso> <folder> [--size SIZE] [--out OUT.iso] [--sign]
+#   kestrel-iso-vault create <folder> --out vault.img [--size SIZE]
+#   kestrel-iso-vault list   <iso>
+#   kestrel-iso-vault remove <in.iso> [--out OUT.iso] [--sign]
+#
+# Passphrase: prompted (gum) unless KESTREL_VAULT_PASS_FILE is set to a file
+# containing it. The passphrase never appears on the command line, so it cannot
+# leak through `ps` or the process environment.
+
+set -euo pipefail
+
+VAULT_PATH=/kestrel/vault.img
+LUKS_LABEL=KESTREL_VAULT
+FS_LABEL=KESTREL_VAULT_FS
+MAPPER=kestrel-vault-build
+
+die() { echo "kestrel-iso-vault: $*" >&2; exit 1; }
+info() { echo "==> $*" >&2; }
+
+usage() {
+  cat >&2 <<'USAGE'
+Usage:
+  kestrel-iso-vault add    <in.iso> <folder> [--size SIZE] [--out OUT.iso] [--sign]
+  kestrel-iso-vault create <folder> --out vault.img [--size SIZE]
+  kestrel-iso-vault list   <iso>
+  kestrel-iso-vault remove <in.iso> [--out OUT.iso] [--sign]
+
+  SIZE is a cryptsetup/truncate size such as 512M or 2G; default fits <folder>.
+  KESTREL_VAULT_PASS_FILE points at a file holding the passphrase (optional).
+USAGE
+  exit "${1:-0}"
+}
+
+ensure_deps() {
+  local missing=() pkg
+  for pkg in cryptsetup e2fsprogs libisoburn util-linux; do
+    pacman -Q "$pkg" >/dev/null 2>&1 || missing+=("$pkg")
+  done
+  if ((${#missing[@]})); then
+    info "Installing: ${missing[*]}"
+    pacman -S --noconfirm --needed --quiet "${missing[@]}"
+  fi
+}
+
+# Read the passphrase once into a 0600 file reused for luksFormat and open.
+read_passfile() {
+  local f
+  f="$(mktemp)"
+  chmod 600 "$f"
+  if [[ -n ${KESTREL_VAULT_PASS_FILE:-} ]]; then
+    cat "$KESTREL_VAULT_PASS_FILE" >"$f"
+  elif command -v gum >/dev/null 2>&1 && [[ -t 0 ]]; then
+    local p1 p2
+    p1="$(gum input --password --header "Vault passphrase")"
+    p2="$(gum input --password --header "Confirm passphrase")"
+    [[ $p1 == "$p2" ]] || die "passphrases do not match"
+    [[ -n $p1 ]] || die "empty passphrase"
+    printf '%s' "$p1" >"$f"
+  else
+    local p1 p2
+    read -r -s -p "Vault passphrase: " p1; echo >&2
+    read -r -s -p "Confirm passphrase: " p2; echo >&2
+    [[ $p1 == "$p2" ]] || die "passphrases do not match"
+    printf '%s' "$p1" >"$f"
+  fi
+  printf '%s' "$f"
+}
+
+# Source size + 5% + 64 MiB, rounded up, unless --size was given.
+container_size() {
+  local folder="$1"
+  if [[ -n ${SIZE_OVERRIDE:-} ]]; then
+    printf '%s' "$SIZE_OVERRIDE"
+    return
+  fi
+  local bytes mib
+  bytes="$(du -sb --apparent-size "$folder" | cut -f1)"
+  mib=$(( (bytes + 1048575) / 1048576 ))
+  mib=$(( mib + mib / 20 + 64 ))
+  printf '%sM' "$mib"
+}
+
+build_container() {
+  local folder="$1" img="$2" size="$3" passfile="$4"
+  [[ -d $folder ]] || die "not a folder: $folder"
+
+  info "Creating $size container from $folder"
+  truncate -s "$size" "$img"
+
+  cryptsetup luksFormat --type luks2 --label "$LUKS_LABEL" --batch-mode \
+    --key-file "$passfile" "$img"
+  cryptsetup open --type luks2 --key-file "$passfile" "$img" "$MAPPER"
+  mkfs.ext4 -q -m 0 -L "$FS_LABEL" "/dev/mapper/$MAPPER"
+
+  local mnt
+  mnt="$(mktemp -d)"
+  mount "/dev/mapper/$MAPPER" "$mnt"
+  # Preserve ownership/mode so the live user (uid 1000) finds the layout.
+  cp -a "$folder/." "$mnt/"
+  sync
+  umount "$mnt"
+  rmdir "$mnt"
+  cryptsetup close "$MAPPER"
+  info "Wrote $img"
+}
+
+inject() {
+  local in="$1" out="$2" img="$3"
+  [[ -f $in ]] || die "no such ISO: $in"
+  info "Injecting vault into ISO"
+  xorriso -indev "$in" -outdev "$out" \
+    -boot_image any replay \
+    -map "$img" "$VAULT_PATH" \
+    -commit -end
+}
+
+remove_vault() {
+  local in="$1" out="$2"
+  info "Removing vault from ISO"
+  xorriso -indev "$in" -outdev "$out" \
+    -boot_image any replay \
+    -rm "$VAULT_PATH" \
+    -commit -end
+}
+
+maybe_sign() {
+  local iso="$1"
+  [[ ${SIGN:-0} == 1 ]] || return 0
+  command -v kestrel-iso-sign >/dev/null 2>&1 || die "kestrel-iso-sign not found"
+  info "Signing $iso"
+  kestrel-iso-sign "$iso"
+  sha256sum "$iso"
+}
+
+main() {
+  [[ $# -ge 1 ]] || usage 1
+  local cmd="$1"
+
+  # Mutating commands need root; re-exec before consuming the arguments.
+  case "$cmd" in
+    add|create|remove) (( EUID == 0 )) || exec sudo -- "$0" "$@" ;;
+  esac
+
+  shift
+  SIZE_OVERRIDE=""; SIGN=0; OUT=""
+  local -a pos=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --size) SIZE_OVERRIDE="$2"; shift 2 ;;
+      --out)  OUT="$2"; shift 2 ;;
+      --sign) SIGN=1; shift ;;
+      -h|--help) usage 0 ;;
+      --) shift; pos+=("$@"); break ;;
+      *) pos+=("$1"); shift ;;
+    esac
+  done
+
+  local workdir img passfile
+  case "$cmd" in
+    add)
+      local in="${pos[0]:-}" folder="${pos[1]:-}"
+      [[ -n $in && -n $folder ]] || usage 1
+      local out="${OUT:-${in%.iso}+vault.iso}"
+      ensure_deps
+      workdir="$(mktemp -d)"
+      img="$workdir/vault.img"
+      passfile="$(read_passfile)"
+      build_container "$folder" "$img" "$(container_size "$folder")" "$passfile"
+      rm -f "$passfile"
+      inject "$in" "$out" "$img"
+      rm -rf "$workdir"
+      maybe_sign "$out"
+      info "Done: $out"
+      ;;
+    create)
+      local folder="${pos[0]:-}"
+      [[ -n $folder ]] || usage 1
+      local out="${OUT:-vault.img}"
+      [[ -e $out ]] && die "refusing to overwrite $out"
+      ensure_deps
+      passfile="$(read_passfile)"
+      build_container "$folder" "$out" "$(container_size "$folder")" "$passfile"
+      rm -f "$passfile"
+      info "Done: $out"
+      ;;
+    list)
+      local in="${pos[0]:-}"
+      [[ -n $in ]] || usage 1
+      command -v xorriso >/dev/null 2>&1 || die "xorriso not found (install libisoburn)"
+      if xorriso -indev "$in" -find / -name vault.img 2>/dev/null | grep -q vault.img; then
+        echo "$in: has a vault at $VAULT_PATH"
+      else
+        echo "$in: no vault"
+      fi
+      ;;
+    remove)
+      local in="${pos[0]:-}"
+      [[ -n $in ]] || usage 1
+      local out="${OUT:-${in%.iso}-novault.iso}"
+      ensure_deps
+      remove_vault "$in" "$out"
+      maybe_sign "$out"
+      info "Done: $out"
+      ;;
+    *) usage 1 ;;
+  esac
+}
+
+main "$@"
