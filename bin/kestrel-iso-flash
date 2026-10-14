@@ -1,0 +1,83 @@
+#!/bin/bash
+
+# kestrel-iso-flash: write a Kestrel ISO to a USB device and, optionally, carve
+# a writable partition in the free space for the portable vault's disk COW.
+#
+# This is destructive: the target device is overwritten. It refuses to touch a
+# mounted device or a device that looks like a system disk, and it asks for
+# confirmation unless --yes is given.
+#
+# Usage:
+#   kestrel-iso-flash <iso> <device> [--cow-size SIZE]
+#   kestrel-iso-flash release/kestrel.iso /dev/sdX --cow-size 8G
+#
+# Without --cow-size the device gets only the ISO (the vault then uses the
+# compressed-RAM COW). With it, a partition named KESTREL_VAULT_COW is appended
+# in the free space, which the runtime uses for the unbounded disk COW.
+
+set -euo pipefail
+
+die() { echo "kestrel-iso-flash: $*" >&2; exit 1; }
+info() { echo "==> $*" >&2; }
+
+usage() {
+  sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-1}"
+}
+
+main() {
+  local iso="" dev="" cow=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --cow-size) cow="$2"; shift 2 ;;
+      --yes|-y) ASSUME_YES=1; shift ;;
+      -h|--help) usage 0 ;;
+      -*) die "unknown option: $1" ;;
+      *) [[ -z $iso ]] && iso="$1" || dev="$1"; shift ;;
+    esac
+  done
+
+  [[ -n $iso && -n $dev ]] || usage 1
+  [[ -f $iso ]] || die "no such ISO: $iso"
+  [[ -b $dev ]] || die "not a block device: $dev"
+
+  (( EUID == 0 )) || exec sudo -- "$0" "$@"
+
+  command -v sgdisk >/dev/null 2>&1 || {
+    info "Installing gptfdisk"
+    pacman -S --noconfirm --needed --quiet gptfdisk
+  }
+
+  # Safety: refuse mounted devices and system disks.
+  if lsblk -no MOUNTPOINT "$dev" | grep -q .; then
+    die "$dev is mounted; unmount it first"
+  fi
+  if lsblk -no MOUNTPOINT "$dev" | grep -qE '^/($|boot|home)'; then
+    die "$dev holds a mounted system path; refusing"
+  fi
+
+  info "Target $dev:"
+  lsblk -dno NAME,SIZE,MODEL "$dev" >&2 || true
+
+  if [[ -z ${ASSUME_YES:-} ]]; then
+    command -v gum >/dev/null 2>&1 || die "gum not found (or pass --yes)"
+    gum confirm "Erase $dev and write $iso?" || die "aborted"
+  fi
+
+  info "Writing ISO (this takes a few minutes)"
+  dd if="$iso" of="$dev" bs=4M status=progress oflag=direct conv=fsync
+  sync
+
+  if [[ -n $cow ]]; then
+    info "Creating ${cow} vault COW partition in the free space"
+    sgdisk --new=0:0:+"$cow" --change-name=0:KESTREL_VAULT_COW "$dev" >/dev/null
+    partprobe "$dev" 2>/dev/null || blockdev --rereadpt "$dev" 2>/dev/null || true
+    sync
+    info "Vault COW partition created (label KESTREL_VAULT_COW)"
+  fi
+
+  info "Done: $dev"
+  lsblk "$dev" >&2 || true
+}
+
+main "$@"
