@@ -59,7 +59,7 @@ create_user() {
   local gecos=()
   [[ -n $KESTREL_USER_NAME ]] && gecos=(-c "$KESTREL_USER_NAME")
 
-  useradd -m "${gecos[@]}" -G wheel,video,render,input,audio -s /bin/bash "$KESTREL_USER"
+  useradd -m "${gecos[@]}" -G wheel,video,render,input,audio,realtime -s /bin/bash "$KESTREL_USER"
   printf '%s:%s\n' "$KESTREL_USER" "$KESTREL_PASSWORD_HASH" | chpasswd -e
   printf 'root:%s\n' "$KESTREL_PASSWORD_HASH" | chpasswd -e
 

@@ -11,7 +11,7 @@ home=/home/$user
 skel=/usr/local/share/kestrel-live
 
 if ! id -u "$user" >/dev/null 2>&1; then
-  useradd -m -u 1000 -G wheel,video,render,input,audio -s /bin/bash "$user"
+  useradd -m -u 1000 -G wheel,video,render,input,audio,realtime -s /bin/bash "$user"
 fi
 echo "kestrel-live-init: user $user ready"
 
